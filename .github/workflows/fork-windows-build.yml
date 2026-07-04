@@ -1,0 +1,137 @@
+name: fork-windows-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build."
+        required: true
+        default: "codex/fork-release"
+      target:
+        description: "Windows Rust target to build."
+        required: true
+        type: choice
+        default: "x86_64-pc-windows-msvc"
+        options:
+          - "x86_64-pc-windows-msvc"
+          - "aarch64-pc-windows-msvc"
+
+# Cargo's libgit2 transport has been flaky when fetching git dependencies with
+# nested submodules. Prefer the system git CLI across every Cargo invocation.
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  WINDOWS_BINARIES: "codex codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.target }} from ${{ inputs.ref }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Print runner specs
+        shell: pwsh
+        run: |
+          $computer = Get-CimInstance Win32_ComputerSystem
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $ramGiB = [math]::Round($computer.TotalPhysicalMemory / 1GB, 1)
+          Write-Host "Runner: $env:RUNNER_NAME"
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "CPU: $($cpu.Name)"
+          Write-Host "Logical CPUs: $($computer.NumberOfLogicalProcessors)"
+          Write-Host "Physical CPUs: $($computer.NumberOfProcessors)"
+          Write-Host "Total RAM: $ramGiB GiB"
+          Write-Host "Disk usage:"
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize Name, @{Name='Size(GB)';Expression={[math]::Round(($_.Used + $_.Free) / 1GB, 1)}}, @{Name='Free(GB)';Expression={[math]::Round($_.Free / 1GB, 1)}}
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ inputs.target }}
+
+      - name: Configure MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ inputs.target }}
+
+      - name: Cargo build Windows binaries
+        shell: pwsh
+        run: |
+          $target = "${{ inputs.target }}"
+          if ($target -eq "x86_64-pc-windows-msvc") {
+            $env:LIBSQLITE3_FLAGS = "SQLITE_DISABLE_INTRINSIC"
+          }
+
+          $binaries = $env:WINDOWS_BINARIES -split " "
+          $buildArgs = @("build", "--target", $target, "--release", "--timings")
+          foreach ($binary in $binaries) {
+            $buildArgs += @("--bin", $binary)
+          }
+
+          cargo @buildArgs
+
+      - name: Upload Cargo timings
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-fork-windows-build-${{ inputs.target }}
+          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      - name: Stage Windows artifacts
+        shell: pwsh
+        run: |
+          $target = "${{ inputs.target }}"
+          $releaseDir = Join-Path -Path (Join-Path -Path "target" -ChildPath $target) -ChildPath "release"
+          $distDir = Join-Path -Path "dist" -ChildPath $target
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+          $binaries = $env:WINDOWS_BINARIES -split " "
+          foreach ($binary in $binaries) {
+            $exePath = Join-Path -Path $releaseDir -ChildPath "$binary.exe"
+            if (-not (Test-Path -LiteralPath $exePath)) {
+              throw "Expected binary not found: $exePath"
+            }
+
+            Copy-Item -LiteralPath $exePath -Destination (Join-Path -Path $distDir -ChildPath "$binary-$target.exe") -Force
+
+            $pdbStem = $binary.Replace("-", "_")
+            $pdbCandidates = @(
+              (Join-Path -Path $releaseDir -ChildPath "$pdbStem.pdb"),
+              (Join-Path -Path $releaseDir -ChildPath "$binary.pdb")
+            )
+            $pdbPath = $pdbCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if ($pdbPath) {
+              Copy-Item -LiteralPath $pdbPath -Destination (Join-Path -Path $distDir -ChildPath "$binary-$target.pdb") -Force
+            }
+          }
+
+          $archivePath = Join-Path -Path "dist" -ChildPath "codex-windows-$target.zip"
+          if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force
+          }
+          Compress-Archive -Path (Join-Path -Path $distDir -ChildPath "*") -DestinationPath $archivePath -Force
+
+          Get-ChildItem -Path "dist" -Recurse | Select-Object FullName, Length
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fork-windows-${{ inputs.target }}-${{ github.run_number }}
+          path: |
+            codex-rs/dist/${{ inputs.target }}/*
+            codex-rs/dist/codex-windows-${{ inputs.target }}.zip
+          if-no-files-found: error
