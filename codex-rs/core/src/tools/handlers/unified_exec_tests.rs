@@ -6,7 +6,13 @@ use codex_tools::UnifiedExecShellMode;
 use codex_tools::ZshForkConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
+#[cfg(windows)]
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
+#[cfg(windows)]
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::session::step_context::StepContext;
@@ -228,6 +234,57 @@ async fn shell_mode_for_environment_uses_direct_mode_for_remote_environments() -
     assert_eq!(
         shell_mode_for_environment(&shell_mode, &remote_environment),
         UnifiedExecShellMode::Direct
+    );
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn touch(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, [])?;
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(windows)]
+async fn exec_command_normalizes_paths_using_requested_git_bash_shell() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let git_root = temp_dir.path().join("Git");
+    let bash_path = git_root.join("bin").join("bash.exe");
+    touch(&git_root.join("cmd").join("git.exe"))?;
+    touch(&bash_path)?;
+    touch(&git_root.join("usr").join("bin").join("msys-2.0.dll"))?;
+    let default_shell = crate::shell::Shell {
+        shell_type: ShellType::PowerShell,
+        shell_path: PathBuf::from("pwsh.exe"),
+    };
+    let cwd = PathUri::parse("file:///C:/Users/Alice")?;
+    let arguments = serde_json::json!({
+        "cmd": "pwd",
+        "shell": bash_path,
+        "workdir": "/c/Users/Alice/project",
+    })
+    .to_string();
+
+    let normalized = exec_command::normalize_exec_command_git_bash_path_arguments(
+        arguments,
+        &default_shell,
+        &UnifiedExecShellMode::Direct,
+        &Environment::default_for_tests(),
+        &cwd,
+    )?;
+    let normalized: serde_json::Value = serde_json::from_str(&normalized)?;
+
+    assert_eq!(
+        normalized,
+        serde_json::json!({
+            "cmd": "pwd",
+            "shell": bash_path,
+            "workdir": r"C:\Users\Alice\project",
+        })
     );
 
     Ok(())
