@@ -648,6 +648,39 @@ mod tests {
     }
 
     #[test]
+    fn windows_git_bash_full_path_uses_bash_lc_safety() {
+        if !cfg!(windows) {
+            return;
+        }
+
+        let git_bash = r"C:\Program Files\Git\bin\bash.exe";
+        assert!(is_known_safe_command(&vec_str(&[
+            git_bash,
+            "-lc",
+            "pwd && ls | wc -l",
+        ])));
+        assert!(is_known_safe_command(&vec_str(&[
+            git_bash, "-lc", "rg TODO",
+        ])));
+        assert!(is_known_safe_command(&vec_str(&[
+            git_bash,
+            "-lc",
+            "git status",
+        ])));
+
+        assert!(!is_known_safe_command(&vec_str(&[
+            git_bash,
+            "-lc",
+            "rm -rf target",
+        ])));
+        assert!(!is_known_safe_command(&vec_str(&[
+            git_bash,
+            "-lc",
+            "echo ok > file.txt",
+        ])));
+    }
+
+    #[test]
     fn bash_lc_safe_examples() {
         assert!(is_known_safe_command(&vec_str(&["bash", "-lc", "ls"])));
         assert!(is_known_safe_command(&vec_str(&["bash", "-lc", "ls -1"])));

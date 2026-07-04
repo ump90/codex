@@ -5,7 +5,11 @@ use crate::context::environment_context::FileSystemContext;
 use crate::context::environment_context::NetworkContext;
 use crate::context::environment_context::push_xml_escaped_text;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::git_bash_paths::PathDisplayStyle;
+use crate::git_bash_paths::format_path_uri_for_shell;
+use crate::git_bash_paths::path_display_style_for_shell;
 use crate::session::turn_context::TurnContext;
+use crate::session::turn_context::TurnEnvironment;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
@@ -27,6 +31,10 @@ impl EnvironmentsState {
         turn_context: &TurnContext,
         environments: &TurnEnvironmentSnapshot,
     ) -> Self {
+        let path_display_style = environments
+            .primary()
+            .map(path_display_style_for_environment)
+            .unwrap_or(PathDisplayStyle::Native);
         Self {
             environments: environment_states(environments),
             current_date: turn_context.current_date.clone(),
@@ -35,6 +43,7 @@ impl EnvironmentsState {
             filesystem: Some(FileSystemContext::from_permission_profile(
                 &turn_context.permission_profile,
                 &turn_context.config.effective_workspace_roots(),
+                path_display_style,
             )),
             subagents: None,
         }
@@ -79,7 +88,10 @@ impl WorldStateSection for EnvironmentsState {
                     (
                         id.clone(),
                         EnvironmentSnapshot {
-                            cwd: environment.cwd.inferred_native_path_string(),
+                            cwd: format_path_uri_for_shell(
+                                &environment.cwd,
+                                environment.path_display_style,
+                            ),
                             status: environment.status,
                             shell: environment.shell.clone(),
                         },
@@ -246,7 +258,8 @@ impl ContextualUserFragment for RenderedEnvironments {
 fn push_environment_values(rendered: &mut String, environment: &EnvironmentState, indent: &str) {
     rendered.push_str(indent);
     rendered.push_str("<cwd>");
-    push_xml_escaped_text(rendered, &environment.cwd.inferred_native_path_string());
+    let cwd = format_path_uri_for_shell(&environment.cwd, environment.path_display_style);
+    push_xml_escaped_text(rendered, &cwd);
     rendered.push_str("</cwd>\n");
     if environment.status == EnvironmentStatus::Starting {
         rendered.push_str(indent);
@@ -278,6 +291,7 @@ struct EnvironmentState {
     cwd: PathUri,
     status: EnvironmentStatus,
     shell: Option<String>,
+    path_display_style: PathDisplayStyle,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -330,6 +344,7 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
                         .shell
                         .as_ref()
                         .map(|shell| shell.name().to_string()),
+                    path_display_style: path_display_style_for_environment(environment),
                 },
             )
         })
@@ -341,9 +356,17 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
                 cwd: environment.selection.cwd.clone(),
                 status: EnvironmentStatus::Starting,
                 shell: None,
+                path_display_style: PathDisplayStyle::Native,
             });
     }
     environments
+}
+
+fn path_display_style_for_environment(environment: &TurnEnvironment) -> PathDisplayStyle {
+    path_display_style_for_shell(
+        environment.shell.as_ref().map(crate::shell::Shell::name),
+        environment.cwd(),
+    )
 }
 
 fn is_legacy_single(environments: &BTreeMap<String, EnvironmentState>) -> bool {

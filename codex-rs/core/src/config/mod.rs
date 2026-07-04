@@ -51,6 +51,7 @@ use codex_config::types::TuiKeymap;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
 use codex_config::types::UriBasedFileOpener;
+use codex_config::types::WindowsDefaultShellToml;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_core_plugins::PluginsConfigInput;
 use codex_exec_server::ExecutorFileSystem;
@@ -107,6 +108,8 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_shell_command::shell_detect::GitBashPathHint;
+use codex_shell_command::shell_detect::GitBashShell;
 pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -930,6 +933,15 @@ pub struct Config {
 
     /// Optional absolute path to patched zsh used by zsh-exec-bridge-backed shell execution.
     pub zsh_path: Option<PathBuf>,
+
+    /// Preferred default Windows shell from `[windows].default_shell`.
+    pub windows_default_shell: Option<WindowsDefaultShellToml>,
+
+    /// Resolved Git for Windows `bash.exe` path when configured or selected.
+    pub windows_git_bash_path: Option<PathBuf>,
+
+    /// Resolved Git for Windows installation root for sandbox read access.
+    pub windows_git_bash_root: Option<PathBuf>,
 
     /// Value to use for `reasoning.effort` when making a request using the
     /// Responses API.
@@ -2237,6 +2249,34 @@ fn thread_store_config(thread_store: Option<ThreadStoreToml>) -> ThreadStoreConf
     }
 }
 
+fn resolve_windows_git_bash_config(
+    windows_default_shell: Option<WindowsDefaultShellToml>,
+    configured_git_bash_path: Option<&PathBuf>,
+) -> std::io::Result<Option<GitBashShell>> {
+    if !cfg!(windows)
+        || (!matches!(
+            windows_default_shell,
+            Some(WindowsDefaultShellToml::GitBash)
+        ) && configured_git_bash_path.is_none())
+    {
+        return Ok(None);
+    }
+
+    let path_hint = match configured_git_bash_path {
+        Some(path) => GitBashPathHint::Configured(path.as_path()),
+        None => GitBashPathHint::SearchPath,
+    };
+
+    codex_shell_command::shell_detect::find_git_bash_shell(path_hint)
+        .map(Some)
+        .map_err(|err| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid Windows shell configuration: {err}"),
+            )
+        })
+}
+
 fn is_session_layer(source: &ConfigLayerSource) -> bool {
     matches!(source, ConfigLayerSource::SessionFlags)
 }
@@ -3074,6 +3114,11 @@ impl Config {
             configured_windows_sandbox_mode
         };
         let windows_sandbox_private_desktop = resolve_windows_sandbox_private_desktop(&cfg);
+        let windows_default_shell = cfg.windows.as_ref().and_then(|windows| windows.default_shell);
+        let configured_windows_git_bash_path = cfg
+            .windows
+            .as_ref()
+            .and_then(|windows| windows.git_bash_path.clone());
         let resolved_cwd = AbsolutePathBuf::try_from(normalize_for_native_workdir({
             use std::env;
 
@@ -3631,6 +3676,17 @@ impl Config {
         let zsh_path = default_zsh_path
             .or_else(|| InstallContext::current().bundled_zsh_path())
             .map(AbsolutePathBuf::into_path_buf);
+        let windows_git_bash = resolve_windows_git_bash_config(
+            windows_default_shell,
+            configured_windows_git_bash_path.as_ref(),
+        )?;
+        let windows_git_bash_path = windows_git_bash
+            .as_ref()
+            .map(|git_bash| git_bash.shell.shell_path.clone())
+            .or(configured_windows_git_bash_path);
+        let windows_git_bash_root = windows_git_bash
+            .as_ref()
+            .map(|git_bash| git_bash.installation_root.clone());
 
         let review_model = override_review_model.or(cfg.review_model);
 
@@ -3724,6 +3780,15 @@ impl Config {
         );
         if features.enabled(Feature::MemoryTool) && memories_config.use_memories {
             helper_readable_roots.push(memories_root);
+        }
+        if matches!(
+            windows_default_shell,
+            Some(WindowsDefaultShellToml::GitBash)
+        ) && let Some(git_bash_root) = windows_git_bash_root
+            .as_ref()
+            .and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok())
+        {
+            helper_readable_roots.push(git_bash_root);
         }
         let effective_permission_profile = constrained_permission_profile.value.get().clone();
         let (mut effective_file_system_sandbox_policy, effective_network_sandbox_policy) =
@@ -3869,6 +3934,9 @@ impl Config {
             codex_linux_sandbox_exe,
             main_execve_wrapper_exe,
             zsh_path,
+            windows_default_shell,
+            windows_git_bash_path,
+            windows_git_bash_root,
 
             hide_agent_reasoning: cfg.hide_agent_reasoning.unwrap_or(false),
             show_raw_agent_reasoning: cfg

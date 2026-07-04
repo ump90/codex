@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -33,6 +34,76 @@ pub struct DetectedShell {
 impl DetectedShell {
     pub fn name(&self) -> &'static str {
         self.shell_type.name()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBashShell {
+    pub shell: DetectedShell,
+    pub installation_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitBashPathHint<'a> {
+    SearchPath,
+    Configured(&'a Path),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBashDiscoveryError {
+    message: String,
+    attempted_paths: Vec<PathBuf>,
+}
+
+impl GitBashDiscoveryError {
+    fn new(message: impl Into<String>, attempted_paths: Vec<PathBuf>) -> Self {
+        Self {
+            message: message.into(),
+            attempted_paths,
+        }
+    }
+
+    pub fn attempted_paths(&self) -> &[PathBuf] {
+        &self.attempted_paths
+    }
+}
+
+impl std::fmt::Display for GitBashDiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)?;
+        if !self.attempted_paths.is_empty() {
+            let attempted_paths = self
+                .attempted_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(f, " Tried: {attempted_paths}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for GitBashDiscoveryError {}
+
+pub fn find_git_bash_shell(
+    path_hint: GitBashPathHint<'_>,
+) -> Result<GitBashShell, GitBashDiscoveryError> {
+    #[cfg(windows)]
+    {
+        find_git_bash_shell_windows(path_hint)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let attempted_paths = match path_hint {
+            GitBashPathHint::SearchPath => Vec::new(),
+            GitBashPathHint::Configured(path) => vec![path.to_path_buf()],
+        };
+        Err(GitBashDiscoveryError::new(
+            "Git Bash is only supported on Windows",
+            attempted_paths,
+        ))
     }
 }
 
@@ -174,8 +245,24 @@ fn get_zsh_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
     })
 }
 
+#[cfg(not(windows))]
 const BASH_FALLBACK_PATHS: &[&str] = &["/bin/bash", "/usr/bin/bash"];
 
+#[cfg(windows)]
+fn get_bash_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
+    let path_hint = match path {
+        Some(path) if path.components().count() > 1 || path.is_absolute() => {
+            GitBashPathHint::Configured(path.as_path())
+        }
+        Some(_) | None => GitBashPathHint::SearchPath,
+    };
+
+    find_git_bash_shell(path_hint)
+        .ok()
+        .map(|git_bash| git_bash.shell)
+}
+
+#[cfg(not(windows))]
 fn get_bash_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
     let shell_path = get_shell_path(ShellType::Bash, path, "bash", BASH_FALLBACK_PATHS);
 
@@ -294,6 +381,187 @@ pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Detecte
     }
 }
 
+#[cfg(windows)]
+fn find_git_bash_shell_windows(
+    path_hint: GitBashPathHint<'_>,
+) -> Result<GitBashShell, GitBashDiscoveryError> {
+    match path_hint {
+        GitBashPathHint::Configured(path) => {
+            let attempted_path = path.to_path_buf();
+            if !path.is_absolute() {
+                return Err(GitBashDiscoveryError::new(
+                    format!(
+                        "`windows.git_bash_path` must be an absolute path to Git for Windows bash.exe: {}",
+                        path.display()
+                    ),
+                    vec![attempted_path],
+                ));
+            }
+            let Some(shell_path) = file_exists(path) else {
+                return Err(GitBashDiscoveryError::new(
+                    format!(
+                        "`windows.git_bash_path` points to `{}` but that file does not exist",
+                        path.display()
+                    ),
+                    vec![attempted_path],
+                ));
+            };
+            git_bash_from_candidate(&shell_path).ok_or_else(|| {
+                GitBashDiscoveryError::new(
+                    format!(
+                        "`windows.git_bash_path` points to `{}` but only Git for Windows bash.exe is supported",
+                        path.display()
+                    ),
+                    vec![shell_path],
+                )
+            })
+        }
+        GitBashPathHint::SearchPath => {
+            let candidates = git_bash_search_candidates();
+            for candidate in &candidates {
+                if let Some(git_bash) = file_exists(candidate)
+                    .as_deref()
+                    .and_then(git_bash_from_candidate)
+                {
+                    return Ok(git_bash);
+                }
+            }
+            Err(GitBashDiscoveryError::new(
+                "`windows.default_shell = \"git-bash\"` was configured, but no Git for Windows Bash was found. Set `windows.git_bash_path` to the absolute path of Git for Windows `bash.exe`.",
+                candidates,
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn git_bash_from_candidate(shell_path: &Path) -> Option<GitBashShell> {
+    let installation_root = git_for_windows_install_root_from_bash(shell_path)?;
+    Some(GitBashShell {
+        shell: DetectedShell {
+            shell_type: ShellType::Bash,
+            shell_path: shell_path.to_path_buf(),
+        },
+        installation_root,
+    })
+}
+
+#[cfg(windows)]
+fn git_bash_search_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(git_path) = which::which("git") {
+        candidates.extend(git_bash_candidates_from_git_exe(&git_path));
+    }
+    candidates.extend([
+        PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+        PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        PathBuf::from(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+        PathBuf::from(r"C:\Program Files (x86)\Git\usr\bin\bash.exe"),
+    ]);
+    if let Ok(bash_path) = which::which("bash") {
+        candidates.push(bash_path);
+    }
+    dedupe_paths(&mut candidates);
+    candidates
+}
+
+#[cfg(windows)]
+fn git_bash_candidates_from_git_exe(git_path: &Path) -> Vec<PathBuf> {
+    git_for_windows_install_root_from_git_exe(git_path)
+        .map(|root| {
+            vec![
+                root.join("bin").join("bash.exe"),
+                root.join("usr").join("bin").join("bash.exe"),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn git_for_windows_install_root_from_git_exe(git_path: &Path) -> Option<PathBuf> {
+    if !path_file_stem_eq(git_path, "git") {
+        return None;
+    }
+
+    let parent = git_path.parent()?;
+    if path_file_name_eq(parent, "shims") {
+        return parent
+            .parent()
+            .map(|scoop_root| scoop_root.join("apps").join("git").join("current"));
+    }
+
+    if path_file_name_eq(parent, "cmd") {
+        return parent.parent().map(Path::to_path_buf);
+    }
+
+    if path_file_name_eq(parent, "bin") {
+        let grandparent = parent.parent()?;
+        if path_file_name_eq(grandparent, "mingw64")
+            || path_file_name_eq(grandparent, "mingw32")
+            || path_file_name_eq(grandparent, "usr")
+        {
+            return grandparent.parent().map(Path::to_path_buf);
+        }
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn git_for_windows_install_root_from_bash(shell_path: &Path) -> Option<PathBuf> {
+    if !path_file_stem_eq(shell_path, "bash") {
+        return None;
+    }
+
+    let parent = shell_path.parent()?;
+    let root = if path_file_name_eq(parent, "bin") {
+        let grandparent = parent.parent()?;
+        if path_file_name_eq(grandparent, "usr") {
+            grandparent.parent()?.to_path_buf()
+        } else {
+            grandparent.to_path_buf()
+        }
+    } else {
+        return None;
+    };
+
+    let git = root.join("cmd").join("git.exe");
+    let msys = root.join("usr").join("bin").join("msys-2.0.dll");
+    if file_exists(&git).is_some() && file_exists(&msys).is_some() {
+        Some(root)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn path_file_stem_eq(path: &Path, expected: &str) -> bool {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+
+#[cfg(windows)]
+fn path_file_name_eq(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+
+#[cfg(windows)]
+fn dedupe_paths(paths: &mut Vec<PathBuf>) {
+    let mut normalized = Vec::<String>::new();
+    paths.retain(|path| {
+        let key = path.to_string_lossy().to_lowercase();
+        if normalized.contains(&key) {
+            false
+        } else {
+            normalized.push(key);
+            true
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +575,10 @@ mod tests {
         );
         assert_eq!(
             detect_shell_type(PathBuf::from("bash")),
+            Some(ShellType::Bash)
+        );
+        assert_eq!(
+            detect_shell_type(PathBuf::from("bash.exe")),
             Some(ShellType::Bash)
         );
         assert_eq!(
@@ -363,6 +635,139 @@ mod tests {
         assert_eq!(
             detect_shell_type(PathBuf::from("cmd.exe")),
             Some(ShellType::Cmd)
+        );
+    }
+
+    #[cfg(windows)]
+    struct TempFixture {
+        path: PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl TempFixture {
+        fn new(name: &str) -> std::io::Result<Self> {
+            let unique = format!(
+                "codex-shell-detect-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system time should be after unix epoch")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir(&path)?;
+            Ok(Self { path })
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TempFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[cfg(windows)]
+    fn touch(path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, [])?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn create_git_for_windows_fixture(root: &Path) -> std::io::Result<()> {
+        touch(&root.join("cmd").join("git.exe"))?;
+        touch(&root.join("bin").join("bash.exe"))?;
+        touch(&root.join("usr").join("bin").join("bash.exe"))?;
+        touch(&root.join("usr").join("bin").join("msys-2.0.dll"))?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn configured_git_bash_accepts_git_for_windows_bin_and_usr_bin() -> anyhow::Result<()> {
+        let fixture = TempFixture::new("git-bash-configured")?;
+        let git_root = fixture.path().join("Git");
+        create_git_for_windows_fixture(&git_root)?;
+
+        for bash_path in [
+            git_root.join("bin").join("bash.exe"),
+            git_root.join("usr").join("bin").join("bash.exe"),
+        ] {
+            let shell = find_git_bash_shell(GitBashPathHint::Configured(&bash_path))?;
+            assert_eq!(
+                shell,
+                GitBashShell {
+                    shell: DetectedShell {
+                        shell_type: ShellType::Bash,
+                        shell_path: bash_path,
+                    },
+                    installation_root: git_root.clone(),
+                }
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn configured_git_bash_rejects_non_git_for_windows_bash() -> anyhow::Result<()> {
+        let fixture = TempFixture::new("git-bash-invalid")?;
+        let bash_path = fixture
+            .path()
+            .join("msys64")
+            .join("usr")
+            .join("bin")
+            .join("bash.exe");
+        touch(&bash_path)?;
+
+        let err = find_git_bash_shell(GitBashPathHint::Configured(&bash_path))
+            .expect_err("non-Git-for-Windows bash should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("only Git for Windows bash.exe is supported")
+        );
+        assert_eq!(err.attempted_paths(), std::slice::from_ref(&bash_path));
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn git_for_windows_candidates_are_derived_from_git_exe_locations() {
+        let program_files_git = PathBuf::from(r"C:\Program Files\Git\cmd\git.exe");
+        assert_eq!(
+            git_bash_candidates_from_git_exe(&program_files_git),
+            vec![
+                PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+                PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            ]
+        );
+
+        let scoop_git = PathBuf::from(r"C:\Users\me\scoop\shims\git.exe");
+        assert_eq!(
+            git_bash_candidates_from_git_exe(&scoop_git),
+            vec![
+                PathBuf::from(r"C:\Users\me\scoop\apps\git\current\bin\bash.exe"),
+                PathBuf::from(r"C:\Users\me\scoop\apps\git\current\usr\bin\bash.exe"),
+            ]
+        );
+
+        let mingw_git = PathBuf::from(r"C:\Git\mingw64\bin\git.exe");
+        assert_eq!(
+            git_bash_candidates_from_git_exe(&mingw_git),
+            vec![
+                PathBuf::from(r"C:\Git\bin\bash.exe"),
+                PathBuf::from(r"C:\Git\usr\bin\bash.exe"),
+            ]
         );
     }
 }

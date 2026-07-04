@@ -15,6 +15,7 @@ use crate::shell::Shell;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use crate::tools::handlers::normalize_git_bash_path_arguments_for_shell;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_workdir_base_path;
 use crate::tools::handlers::rewrite_function_string_argument;
@@ -187,6 +188,16 @@ impl ShellCommandHandler {
             ));
         };
 
+        let session_shell = session.user_shell();
+        let shell = turn_environment
+            .shell
+            .as_ref()
+            .unwrap_or(session_shell.as_ref());
+        let arguments = normalize_git_bash_path_arguments_for_shell(
+            arguments,
+            Some(shell.name()),
+            turn_environment.cwd(),
+        )?;
         let environment_cwd = turn_environment.cwd().to_abs_path().map_err(|err| {
             FunctionCallError::RespondToModel(format!(
                 "shell_command cwd `{}` is not native to the Codex host: {err}",

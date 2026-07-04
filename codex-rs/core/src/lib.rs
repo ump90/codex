@@ -44,6 +44,7 @@ mod environment_selection;
 pub mod exec;
 pub mod exec_env;
 mod exec_policy;
+pub(crate) mod git_bash_paths;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;

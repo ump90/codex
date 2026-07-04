@@ -11,6 +11,7 @@ use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::handlers::apply_patch::intercept_apply_patch;
 use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
+use crate::tools::handlers::normalize_git_bash_path_arguments_for_shell;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_tool_environment;
@@ -138,6 +139,19 @@ impl ExecCommandHandler {
                 "unified exec is unavailable in this session".to_string(),
             ));
         };
+        // Remote environments may use a different OS and must build commands with their native
+        // shell; fall back to the session shell when the environment did not report one.
+        let shell = turn_environment
+            .shell
+            .clone()
+            .map(Arc::new)
+            .unwrap_or_else(|| session.user_shell());
+        let arguments = normalize_git_bash_path_arguments_for_shell(
+            arguments,
+            Some(shell.name()),
+            turn_environment.cwd(),
+        )?;
+        let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
         let native_environment_cwd = turn_environment.cwd().clone();
         let cwd = environment_args
             .workdir
@@ -202,13 +216,6 @@ impl ExecCommandHandler {
         }
         let shell_mode =
             shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
-        // Remote environments may use a different OS and must build commands with their native
-        // shell; fall back to the session shell when the environment did not report one.
-        let shell = turn_environment
-            .shell
-            .clone()
-            .map(Arc::new)
-            .unwrap_or_else(|| session.user_shell());
         // TODO(anp): Resolve requested shells in remote environments instead of restricting
         // commands to the reported default shell.
         if environment.is_remote()

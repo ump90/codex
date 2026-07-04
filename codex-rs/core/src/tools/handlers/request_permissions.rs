@@ -6,6 +6,7 @@ use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use crate::tools::handlers::normalize_git_bash_path_arguments_for_shell;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_tool_environment;
@@ -73,6 +74,16 @@ impl RequestPermissionsHandler {
                 "request_permissions requires a primary environment".to_string(),
             ));
         };
+        let session_shell = session.user_shell();
+        let shell_name = turn_environment
+            .shell
+            .as_ref()
+            .map_or_else(|| session_shell.name(), |shell| shell.name());
+        let arguments = normalize_git_bash_path_arguments_for_shell(
+            arguments,
+            Some(shell_name),
+            turn_environment.cwd(),
+        )?;
         // TODO(anp): Migrate request_permissions parsing and permission profiles to PathUri so
         // environment-native foreign paths do not require host conversion.
         let native_cwd = turn_environment.cwd().to_abs_path().map_err(|err| {

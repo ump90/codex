@@ -90,7 +90,7 @@ def run_sbx(
             f'sandbox_workspace_write.writable_roots=["{additional_root.as_posix()}"]',
         ]
 
-    argv = [*CODEX_CMD, "sandbox", "windows", *policy_flags, *overrides, "--", *cmd_argv]
+    argv = [*CODEX_CMD, "sandbox", *policy_flags, *overrides, "--", *cmd_argv]
     print(cmd_argv)
     cp = subprocess.run(argv, cwd=str(cwd), env=env,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -99,6 +99,59 @@ def run_sbx(
 
 def have(cmd: str) -> bool:
     return shutil.which(cmd) is not None
+
+def _git_for_windows_root_from_bash(bash_path: Path) -> Optional[Path]:
+    if bash_path.name.lower() != "bash.exe":
+        return None
+    parent = bash_path.parent
+    if parent.name.lower() != "bin":
+        return None
+    root = parent.parent.parent if parent.parent.name.lower() == "usr" else parent.parent
+    if (root / "cmd" / "git.exe").exists() and (root / "usr" / "bin" / "msys-2.0.dll").exists():
+        return root
+    return None
+
+def _git_bash_candidates_from_git(git_path: Path) -> List[Path]:
+    parent = git_path.parent
+    if parent.name.lower() == "cmd":
+        root = parent.parent
+    elif parent.name.lower() == "bin" and parent.parent.name.lower() == "mingw64":
+        root = parent.parent.parent
+    else:
+        return []
+    return [root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"]
+
+def resolve_git_for_windows_bash() -> Optional[Tuple[Path, Path]]:
+    candidates: List[Path] = []
+    git = shutil.which("git")
+    if git:
+        candidates.extend(_git_bash_candidates_from_git(Path(git).resolve()))
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+    candidates.extend([
+        program_files / "Git" / "bin" / "bash.exe",
+        program_files / "Git" / "usr" / "bin" / "bash.exe",
+        program_files_x86 / "Git" / "bin" / "bash.exe",
+    ])
+    bash = shutil.which("bash")
+    if bash:
+        candidates.append(Path(bash).resolve())
+
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not candidate.exists():
+            continue
+        root = _git_for_windows_root_from_bash(candidate)
+        if root is not None:
+            return candidate, root
+    return None
+
+def bash_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
 
 def make_dir_clean(p: Path) -> None:
     if p.exists():
@@ -434,6 +487,55 @@ def main() -> int:
         add("WS: git --version (optional)", rc == 0, f"rc={rc}, err={err}")
     else:
         add("WS: git --version (optional, skipped)", True)
+
+    # 21b. Optional: Git for Windows Bash works inside the sandbox.
+    git_bash = resolve_git_for_windows_bash()
+    if git_bash:
+        bash_path, git_root = git_bash
+
+        rc, out, err = run_sbx(
+            "read-only",
+            [str(bash_path), "-lc", "pwd && ls"],
+            WS_ROOT,
+        )
+        add(
+            "RO: Git Bash pwd+ls allowed",
+            rc == 0 and bool(out.strip()),
+            f"rc={rc}, out={out}, err={err}",
+        )
+
+        target = WS_ROOT / "git_bash_ws_ok.txt"
+        remove_if_exists(target)
+        rc, out, err = run_sbx(
+            "workspace-write",
+            [str(bash_path), "-lc", "printf ok > git_bash_ws_ok.txt"],
+            WS_ROOT,
+        )
+        add(
+            "WS: Git Bash write allowed",
+            rc == 0 and assert_exists(target) and target.read_text(encoding="utf-8") == "ok",
+            f"rc={rc}, err={err}",
+        )
+
+        target = WS_ROOT / "git_bash_ro_fail.txt"
+        remove_if_exists(target)
+        rc, out, err = run_sbx(
+            "read-only",
+            [str(bash_path), "-lc", "printf no > git_bash_ro_fail.txt"],
+            WS_ROOT,
+        )
+        add("RO: Git Bash write denied", rc != 0 and assert_not_exists(target), f"rc={rc}, err={err}")
+
+        msys_dll = (git_root / "usr" / "bin" / "msys-2.0.dll")
+        msys_dll_bash_path = str(msys_dll).replace("\\", "/")
+        rc, out, err = run_sbx(
+            "read-only",
+            [str(bash_path), "-lc", f"test -r {bash_quote(msys_dll_bash_path)}"],
+            WS_ROOT,
+        )
+        add("RO: Git Bash install root readable", rc == 0, f"rc={rc}, git_root={git_root}, err={err}")
+    else:
+        add("Git Bash sandbox tests (optional, skipped)", True, "Git for Windows Bash not found")
 
     # 24. WS: PS bytes write (OK)
     rc, out, err = run_sbx("workspace-write",

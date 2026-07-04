@@ -1,5 +1,7 @@
+use codex_config::types::WindowsDefaultShellToml;
 use codex_exec_server::ShellInfo;
 use codex_shell_command::shell_detect::DetectedShell;
+use codex_shell_command::shell_detect::GitBashPathHint;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -76,7 +78,6 @@ impl Shell {
     }
 }
 
-#[cfg(all(test, unix))]
 fn ultimate_fallback_shell() -> Shell {
     codex_shell_command::shell_detect::ultimate_fallback_shell().into()
 }
@@ -93,6 +94,35 @@ pub fn default_user_shell() -> Shell {
     codex_shell_command::shell_detect::default_user_shell().into()
 }
 
+pub fn default_user_shell_for_windows_config(
+    default_shell: Option<WindowsDefaultShellToml>,
+    git_bash_path: Option<&PathBuf>,
+) -> anyhow::Result<Shell> {
+    if !cfg!(windows) {
+        return Ok(default_user_shell());
+    }
+
+    match default_shell {
+        Some(WindowsDefaultShellToml::GitBash) => {
+            let path_hint = match git_bash_path {
+                Some(path) => GitBashPathHint::Configured(path.as_path()),
+                None => GitBashPathHint::SearchPath,
+            };
+            codex_shell_command::shell_detect::find_git_bash_shell(path_hint)
+                .map(|git_bash| git_bash.shell.into())
+                .map_err(|err| anyhow::anyhow!("{err}"))
+        }
+        Some(WindowsDefaultShellToml::PowerShell) => {
+            Ok(get_shell(ShellType::PowerShell, /*path*/ None)
+                .unwrap_or_else(ultimate_fallback_shell))
+        }
+        Some(WindowsDefaultShellToml::Cmd) => {
+            Ok(get_shell(ShellType::Cmd, /*path*/ None).unwrap_or_else(ultimate_fallback_shell))
+        }
+        None => Ok(default_user_shell()),
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
     codex_shell_command::shell_detect::default_user_shell_from_path(user_shell_path).into()
@@ -102,3 +132,8 @@ fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
 #[cfg(unix)]
 #[path = "shell_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[cfg(windows)]
+#[path = "shell_windows_tests.rs"]
+mod windows_tests;

@@ -59,7 +59,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         properties.insert(
             "shell".to_string(),
             JsonSchema::string(Some(
-                "Shell binary to launch. Defaults to the user's default shell.".to_string(),
+                "Shell binary to launch. Defaults to the user's default shell from <environment_context><shell>. On Windows, pass an absolute Git for Windows bash.exe path when explicitly selecting Git Bash.".to_string(),
             )),
         );
     }
@@ -187,16 +187,15 @@ pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
 
     let description = if cfg!(windows) {
         format!(
-            r#"Runs a Powershell command (Windows) and returns its output.
+            r#"Runs a command in the user's default Windows shell and returns its output.
 
-Examples of valid command strings:
+Use the shell shown in <environment_context><shell>:
 
-- ls -a (show hidden): "Get-ChildItem -Force"
-- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"
-- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"
-- ps aux | grep python: "Get-Process | Where-Object {{ $_.ProcessName -like '*python*' }}"
-- setting an env var: "$env:FOO='bar'; echo $env:FOO"
-- running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -"
+- Git Bash/bash: "ls -la", "find . -name '*.py'", "rg TODO", "FOO=bar python - <<'PY'\nprint('Hello, world!')\nPY"
+- PowerShell: "Get-ChildItem -Force", "Get-ChildItem -Recurse -Filter *.py", "$env:FOO='bar'; echo $env:FOO"
+- cmd: "dir /a", "dir /s /b *.py", "set FOO=bar && echo %FOO%"
+
+Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.
 
 {}"#,
             windows_shell_guidance()
@@ -401,7 +400,8 @@ fn file_system_permissions_schema() -> JsonSchema {
 
 fn windows_shell_guidance() -> &'static str {
     r#"Windows safety rules:
-- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
+- When <environment_context><shell> is `bash`, commands run in Git Bash. Use Git Bash paths such as `/c/Users/name/project` or forward-slash Windows paths such as `C:/Users/name/project`; do not put raw backslash paths like `C:\Users\name` directly in Bash commands.
+- Do not compose destructive filesystem commands across shells. Do not enumerate paths in one shell and then pass them to PowerShell, `cmd /c`, batch builtins, Git Bash, or another shell for deletion or moving. Use one shell end-to-end, prefer that shell's literal-path facilities, and avoid string-built shell commands for file operations.
 - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.
 - When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control."#
 }

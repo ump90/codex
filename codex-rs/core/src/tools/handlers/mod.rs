@@ -42,6 +42,7 @@ use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use codex_sandboxing::policy_transforms::normalize_additional_permissions;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
+use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde_json::Map;
 use serde_json::Value;
@@ -49,6 +50,10 @@ use std::path::Path;
 
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::function_tool::FunctionCallError;
+use crate::git_bash_paths::PathDisplayStyle;
+use crate::git_bash_paths::git_bash_path_to_windows_path;
+use crate::git_bash_paths::path_display_style_for_shell;
+use crate::git_bash_paths::rewrite_git_bash_path_arguments;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnEnvironment;
@@ -152,6 +157,34 @@ fn resolve_workdir_base_path(
         .and_then(Value::as_str)
         .filter(|workdir| !workdir.is_empty())
         .map_or_else(|| default_cwd.clone(), |workdir| default_cwd.join(workdir)))
+}
+
+fn normalize_git_bash_path_arguments_for_shell(
+    arguments: String,
+    shell_name: Option<&str>,
+    cwd: &PathUri,
+) -> Result<String, FunctionCallError> {
+    if path_display_style_for_shell(shell_name, cwd) != PathDisplayStyle::GitBash {
+        return Ok(arguments);
+    }
+
+    rewrite_git_bash_path_arguments(&arguments).map_err(|err| {
+        FunctionCallError::RespondToModel(format!(
+            "failed to normalize Git Bash path arguments: {err}"
+        ))
+    })
+}
+
+fn normalize_git_bash_path_argument_for_shell(
+    path: String,
+    shell_name: Option<&str>,
+    cwd: &PathUri,
+) -> String {
+    if path_display_style_for_shell(shell_name, cwd) != PathDisplayStyle::GitBash {
+        return path;
+    }
+
+    git_bash_path_to_windows_path(&path).unwrap_or(path)
 }
 
 fn resolve_tool_environment<'a>(

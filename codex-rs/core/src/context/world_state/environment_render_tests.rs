@@ -28,13 +28,22 @@ fn test_abs_path(unix_path: &str) -> AbsolutePathBuf {
     test_path_buf(unix_path).abs()
 }
 
+fn model_visible_path(path: &AbsolutePathBuf, shell: &str) -> String {
+    let path = PathUri::from_abs_path(path);
+    let path_display_style = path_display_style_for_shell(Some(shell), &path);
+    format_path_uri_for_shell(&path, path_display_style)
+}
+
 fn environment(id: &str, cwd: PathUri, shell: impl Into<String>) -> (String, EnvironmentState) {
+    let shell = shell.into();
+    let path_display_style = path_display_style_for_shell(Some(&shell), &cwd);
     (
         id.to_string(),
         EnvironmentState {
             cwd,
             status: EnvironmentStatus::Available,
-            shell: Some(shell.into()),
+            shell: Some(shell),
+            path_display_style,
         },
     )
 }
@@ -59,6 +68,7 @@ fn environment_state(
 #[test]
 fn serialize_workspace_write_environment_context() {
     let cwd = test_path_buf("/repo");
+    let model_cwd = model_visible_path(&cwd.abs(), "bash");
     let context = environment_state(
         [environment(
             "local",
@@ -73,12 +83,11 @@ fn serialize_workspace_write_environment_context() {
 
     let expected = format!(
         r#"<environment_context>
-  <cwd>{cwd}</cwd>
+  <cwd>{model_cwd}</cwd>
   <shell>bash</shell>
   <current_date>2026-02-26</current_date>
   <timezone>America/Los_Angeles</timezone>
 </environment_context>"#,
-        cwd = cwd.display(),
     );
 
     assert_eq!(context.render(), expected);
@@ -103,6 +112,29 @@ fn serialize_environment_context_with_foreign_windows_cwd() {
         r#"<environment_context>
   <cwd>C:\windows</cwd>
   <shell>powershell</shell>
+</environment_context>"#
+    );
+}
+
+#[test]
+fn serialize_environment_context_with_git_bash_windows_cwd() {
+    let context = environment_state(
+        [environment(
+            "local",
+            PathUri::parse("file:///C:/Users/ump90/Desktop").expect("Windows cwd URI"),
+            "bash",
+        )],
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    );
+
+    assert_eq!(
+        context.render(),
+        r#"<environment_context>
+  <cwd>/c/Users/ump90/Desktop</cwd>
+  <shell>bash</shell>
 </environment_context>"#
     );
 }
@@ -133,7 +165,7 @@ fn serialize_environment_context_with_network() {
   <timezone>America/Los_Angeles</timezone>
   <network enabled="true"><allowed>api.example.com,*.openai.com</allowed><denied>blocked.example.com</denied></network>
 </environment_context>"#,
-        test_path_buf("/repo").display()
+        model_visible_path(&test_abs_path("/repo"), "bash")
     );
 
     assert_eq!(context.render(), expected);
@@ -189,6 +221,7 @@ fn serialize_environment_context_with_full_filesystem_profile() {
     context.filesystem = Some(FileSystemContext::from_permission_profile(
         &workspace_write_permission_profile_with_private_denials(),
         &[repo.clone(), other_repo.clone()],
+        PathDisplayStyle::Native,
     ));
 
     let expected = format!(
@@ -197,7 +230,7 @@ fn serialize_environment_context_with_full_filesystem_profile() {
   <shell>bash</shell>
   <filesystem><workspace_roots><root>{repo}</root><root>{other_repo}</root></workspace_roots><permission_profile type="managed"><file_system type="restricted"><entry access="write"><path>{repo}</path></entry><entry access="write"><path>{other_repo}</path></entry><entry access="deny" escalatable="false"><path>{repo_private}</path></entry><entry access="deny" escalatable="false"><path>{other_repo_private}</path></entry><entry access="deny" escalatable="false"><glob>{repo_private_glob}</glob></entry><entry access="deny" escalatable="false"><glob>{other_repo_private_glob}</glob></entry></file_system></permission_profile></filesystem>
 </environment_context>"#,
-        test_path_buf("/repo").display(),
+        model_visible_path(&test_abs_path("/repo"), "bash"),
         repo = repo.to_string_lossy(),
         other_repo = other_repo.to_string_lossy(),
         repo_private = repo_private.to_string_lossy(),
@@ -252,7 +285,7 @@ fn serialize_environment_context_with_subagents() {
     - agent-2
   </subagents>
 </environment_context>"#,
-        test_path_buf("/repo").display()
+        model_visible_path(&test_abs_path("/repo"), "bash")
     );
 
     assert_eq!(context.render(), expected);
@@ -288,8 +321,8 @@ fn serialize_environment_context_with_multiple_selected_environments() {
   <current_date>2026-02-26</current_date>
   <timezone>America/Los_Angeles</timezone>
 </environment_context>"#,
-        local_cwd.display(),
-        remote_cwd.display()
+        model_visible_path(&local_cwd.abs(), "bash"),
+        model_visible_path(&remote_cwd.abs(), "bash")
     );
 
     assert_eq!(context.render(), expected);

@@ -878,7 +878,10 @@ impl Session {
                     )
                 })?
             } else {
-                shell::default_user_shell()
+                shell::default_user_shell_for_windows_config(
+                    config.windows_default_shell,
+                    config.windows_git_bash_path.as_ref(),
+                )?
             };
             let shell_snapshot = if config.features.enabled(Feature::ShellSnapshot) {
                 ShellSnapshot::new(
