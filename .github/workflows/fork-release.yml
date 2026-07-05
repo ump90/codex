@@ -1,0 +1,311 @@
+name: fork-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create or update, for example 0.143.0-alpha.35-gitbash."
+        required: true
+        type: string
+      ref:
+        description: "Branch, tag, or SHA to release."
+        required: true
+        default: "codex/fork-release"
+        type: string
+      release_name:
+        description: "GitHub Release title. Defaults to the release tag."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: true
+        default: true
+        type: boolean
+      draft:
+        description: "Create or keep the GitHub Release as a draft."
+        required: true
+        default: false
+        type: boolean
+      release_notes:
+        description: "Optional release notes. Defaults to the released commit message."
+        required: false
+        type: string
+
+# Cargo's libgit2 transport has been flaky when fetching git dependencies with
+# nested submodules. Prefer the system git CLI across every Cargo invocation.
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  WINDOWS_BINARIES: "codex codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      ref_sha: ${{ steps.metadata.outputs.ref_sha }}
+      release_name: ${{ steps.metadata.outputs.release_name }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release metadata
+        id: metadata
+        shell: bash
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RELEASE_TAG}" ]]; then
+            echo "release_tag is required." >&2
+            exit 1
+          fi
+
+          git check-ref-format "refs/tags/${RELEASE_TAG}"
+
+          ref_sha="$(git rev-parse HEAD)"
+          if [[ -z "${RELEASE_NAME}" ]]; then
+            RELEASE_NAME="${RELEASE_TAG}"
+          fi
+
+          {
+            echo "ref_sha=${ref_sha}"
+            echo "release_name=${RELEASE_NAME}"
+            echo "release_tag=${RELEASE_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    name: Build Windows ${{ matrix.target }}
+    needs: metadata
+    runs-on: windows-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.metadata.outputs.ref_sha }}
+          persist-credentials: false
+
+      - name: Print runner specs
+        shell: pwsh
+        run: |
+          $computer = Get-CimInstance Win32_ComputerSystem
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $ramGiB = [math]::Round($computer.TotalPhysicalMemory / 1GB, 1)
+          Write-Host "Runner: $env:RUNNER_NAME"
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          Write-Host "CPU: $($cpu.Name)"
+          Write-Host "Logical CPUs: $($computer.NumberOfLogicalProcessors)"
+          Write-Host "Physical CPUs: $($computer.NumberOfProcessors)"
+          Write-Host "Total RAM: $ramGiB GiB"
+          Write-Host "Disk usage:"
+          Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize Name, @{Name='Size(GB)';Expression={[math]::Round(($_.Used + $_.Free) / 1GB, 1)}}, @{Name='Free(GB)';Expression={[math]::Round($_.Free / 1GB, 1)}}
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Configure MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cargo build Windows binaries
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          if ($target -eq "x86_64-pc-windows-msvc") {
+            $env:LIBSQLITE3_FLAGS = "SQLITE_DISABLE_INTRINSIC"
+          }
+
+          $binaries = $env:WINDOWS_BINARIES -split " "
+          $buildArgs = @("build", "--target", $target, "--release", "--timings")
+          foreach ($binary in $binaries) {
+            $buildArgs += @("--bin", $binary)
+          }
+
+          cargo @buildArgs
+
+      - name: Upload Cargo timings
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-fork-release-${{ matrix.target }}
+          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      - name: Stage Windows artifacts
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $releaseDir = Join-Path -Path (Join-Path -Path "target" -ChildPath $target) -ChildPath "release"
+          $distDir = Join-Path -Path "dist" -ChildPath $target
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+          $binaries = $env:WINDOWS_BINARIES -split " "
+          foreach ($binary in $binaries) {
+            $exePath = Join-Path -Path $releaseDir -ChildPath "$binary.exe"
+            if (-not (Test-Path -LiteralPath $exePath)) {
+              throw "Expected binary not found: $exePath"
+            }
+
+            Copy-Item -LiteralPath $exePath -Destination (Join-Path -Path $distDir -ChildPath "$binary-$target.exe") -Force
+
+            $pdbStem = $binary.Replace("-", "_")
+            $pdbCandidates = @(
+              (Join-Path -Path $releaseDir -ChildPath "$pdbStem.pdb"),
+              (Join-Path -Path $releaseDir -ChildPath "$binary.pdb")
+            )
+            $pdbPath = $pdbCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if ($pdbPath) {
+              Copy-Item -LiteralPath $pdbPath -Destination (Join-Path -Path $distDir -ChildPath "$binary-$target.pdb") -Force
+            }
+          }
+
+          $archivePath = Join-Path -Path "dist" -ChildPath "codex-windows-$target.zip"
+          if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force
+          }
+          Compress-Archive -Path (Join-Path -Path $distDir -ChildPath "*") -DestinationPath $archivePath -Force
+
+          Get-ChildItem -Path "dist" -Recurse | Select-Object FullName, Length
+
+      - name: Upload Windows release archive
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fork-release-windows-${{ matrix.target }}
+          path: codex-rs/dist/codex-windows-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - metadata
+      - build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.metadata.outputs.ref_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fork-release-windows-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-artifacts
+          sha256sum codex-windows-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Ensure release tag points at selected ref
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.metadata.outputs.ref_sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" || true
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null; then
+            existing_sha="$(git rev-list -n 1 "${RELEASE_TAG}")"
+            if [[ "${existing_sha}" != "${TARGET_SHA}" ]]; then
+              echo "Tag ${RELEASE_TAG} already points at ${existing_sha}, not ${TARGET_SHA}." >&2
+              echo "Refusing to move an existing release tag." >&2
+              exit 1
+            fi
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${RELEASE_TAG}" -m "Release ${RELEASE_TAG}" "${TARGET_SHA}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+
+      - name: Write release notes
+        shell: bash
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+          TARGET_SHA: ${{ needs.metadata.outputs.ref_sha }}
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          if [[ -n "${RELEASE_NOTES}" ]]; then
+            printf '%s\n' "${RELEASE_NOTES}" > "${notes_path}"
+          else
+            git log -1 --format='%s%n%n%b' "${TARGET_SHA}" > "${notes_path}"
+          fi
+          echo "RELEASE_NOTES_PATH=${notes_path}" >> "$GITHUB_ENV"
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          DRAFT: ${{ inputs.draft }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_NAME: ${{ needs.metadata.outputs.release_name }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.metadata.outputs.ref_sha }}
+        run: |
+          set -euo pipefail
+
+          create_args=(
+            "${RELEASE_TAG}"
+            --verify-tag
+            --target "${TARGET_SHA}"
+            --title "${RELEASE_NAME}"
+            --notes-file "${RELEASE_NOTES_PATH}"
+          )
+          if [[ "${DRAFT}" == "true" ]]; then
+            create_args+=(--draft)
+          fi
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            create_args+=(--prerelease)
+          fi
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --target "${TARGET_SHA}" \
+              --title "${RELEASE_NAME}" \
+              --notes-file "${RELEASE_NOTES_PATH}" \
+              --draft="${DRAFT}" \
+              --prerelease="${PRERELEASE}"
+          else
+            gh release create "${create_args[@]}"
+          fi
+
+          mapfile -t assets < <(find release-artifacts -maxdepth 1 -type f \( -name 'codex-windows-*.zip' -o -name 'SHA256SUMS.txt' \) | sort)
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No release assets found." >&2
+            exit 1
+          fi
+
+          gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
