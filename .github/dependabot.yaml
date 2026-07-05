@@ -2,12 +2,6 @@
 
 version: 2
 updates:
-  - package-ecosystem: bun
-    directory: .github/actions/codex
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
   - package-ecosystem: cargo
     directories:
       - codex-rs
