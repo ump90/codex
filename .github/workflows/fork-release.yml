@@ -35,6 +35,7 @@ on:
 # nested submodules. Prefer the system git CLI across every Cargo invocation.
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  GIT_FOR_WINDOWS_RELEASE_TAG: "v2.55.0.windows.2"
   WINDOWS_BINARIES: "codex codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
 
 concurrency:
@@ -191,11 +192,28 @@ jobs:
 
       - name: Build portable Windows package
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $target = "${{ matrix.target }}"
           $releaseDir = Join-Path -Path (Join-Path -Path "target" -ChildPath $target) -ChildPath "release"
-          $packageDir = Join-Path -Path "dist" -ChildPath "portable-$target"
-          $portableArchivePath = Join-Path -Path "dist" -ChildPath "codex-portable-windows-$target.zip"
+          $distRoot = Join-Path -Path (Get-Location) -ChildPath "dist"
+          $packageDir = Join-Path -Path $distRoot -ChildPath "portable-$target"
+          $portableArchivePath = Join-Path -Path $distRoot -ChildPath "codex-portable-windows-$target.zip"
+
+          function Get-SevenZip {
+            $command = Get-Command 7z -ErrorAction SilentlyContinue
+            if ($command) {
+              return $command.Source
+            }
+
+            $defaultPath = Join-Path -Path ${env:ProgramFiles} -ChildPath "7-Zip\7z.exe"
+            if (Test-Path -LiteralPath $defaultPath) {
+              return $defaultPath
+            }
+
+            throw "7-Zip was not found on PATH or at $defaultPath"
+          }
 
           python ..\scripts\build_codex_package.py `
             --target $target `
@@ -207,15 +225,56 @@ jobs:
             --codex-command-runner-bin (Join-Path -Path $releaseDir -ChildPath "codex-command-runner.exe") `
             --codex-windows-sandbox-setup-bin (Join-Path -Path $releaseDir -ChildPath "codex-windows-sandbox-setup.exe")
 
+          $sevenZip = Get-SevenZip
+          $gitAssetPattern = switch ($target) {
+            "x86_64-pc-windows-msvc" { "PortableGit-*-64-bit.7z.exe"; break }
+            "aarch64-pc-windows-msvc" { "PortableGit-*-arm64.7z.exe"; break }
+            default { throw "No PortableGit asset pattern for target: $target" }
+          }
+          $gitDownloadDir = Join-Path -Path $env:RUNNER_TEMP -ChildPath "portable-git-$target"
+          $gitDir = Join-Path -Path $packageDir -ChildPath "git"
+          New-Item -ItemType Directory -Path $gitDownloadDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $gitDir -Force | Out-Null
+
+          gh release download $env:GIT_FOR_WINDOWS_RELEASE_TAG `
+            --repo git-for-windows/git `
+            --pattern $gitAssetPattern `
+            --dir $gitDownloadDir `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download $gitAssetPattern from git-for-windows/git $env:GIT_FOR_WINDOWS_RELEASE_TAG"
+          }
+
+          $gitAssets = @(Get-ChildItem -LiteralPath $gitDownloadDir -Filter "PortableGit-*.7z.exe")
+          if ($gitAssets.Count -ne 1) {
+            throw "Expected exactly one PortableGit asset in $gitDownloadDir, found $($gitAssets.Count)"
+          }
+
+          & $sevenZip x $gitAssets[0].FullName "-o$gitDir" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to extract $($gitAssets[0].FullName)"
+          }
+
+          foreach ($relativePath in @("cmd\git.exe", "bin\bash.exe", "usr\bin\bash.exe", "usr\bin\msys-2.0.dll")) {
+            $path = Join-Path -Path $gitDir -ChildPath $relativePath
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "PortableGit extraction is missing $relativePath"
+            }
+          }
+
           @'
           @echo off
-          "%~dp0bin\codex.exe" %*
+          set "CODEX_PORTABLE_ROOT=%~dp0"
+          set "PATH=%CODEX_PORTABLE_ROOT%git\cmd;%CODEX_PORTABLE_ROOT%git\bin;%PATH%"
+          "%CODEX_PORTABLE_ROOT%bin\codex.exe" %*
           exit /b %ERRORLEVEL%
           '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "codex.cmd") -Encoding ascii
 
           @'
           #!/usr/bin/env pwsh
-          & "$PSScriptRoot\bin\codex.exe" @args
+          $root = $PSScriptRoot
+          $env:PATH = "$root\git\cmd;$root\git\bin;$env:PATH"
+          & "$root\bin\codex.exe" @args
           exit $LASTEXITCODE
           '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "codex.ps1") -Encoding utf8
 
@@ -226,15 +285,39 @@ jobs:
 
             codex --version
 
+          This archive includes Portable Git for Windows under git\. When Codex
+          starts through codex.cmd or codex.ps1, the launcher prepends the bundled
+          git\cmd and git\bin directories to PATH so Codex can find Git Bash.
+
+          To use Git Bash as Codex's default Windows shell, add this to:
+
+            %USERPROFILE%\.codex\config.toml
+
+          [windows]
+          default_shell = "git-bash"
+
           You can also add the bin directory to PATH and run codex.exe directly.
+          In that case, add git\cmd to PATH yourself or set windows.git_bash_path
+          to the extracted git\bin\bash.exe path.
           '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "PORTABLE-INSTALL.txt") -Encoding utf8
 
           if (Test-Path -LiteralPath $portableArchivePath) {
             Remove-Item -LiteralPath $portableArchivePath -Force
           }
-          Compress-Archive -Path (Join-Path -Path $packageDir -ChildPath "*") -DestinationPath $portableArchivePath -Force
+          Push-Location $packageDir
+          try {
+            & $sevenZip a -tzip $portableArchivePath ".\*"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create $portableArchivePath"
+            }
+          } finally {
+            Pop-Location
+          }
 
-          Get-ChildItem -Path $packageDir -Recurse | Select-Object FullName, Length
+          $packageFiles = @(Get-ChildItem -Path $packageDir -Recurse -File)
+          $packageSizeMiB = [math]::Round((($packageFiles | Measure-Object -Property Length -Sum).Sum) / 1MB, 1)
+          Write-Host "Portable package files: $($packageFiles.Count); unpacked size: $packageSizeMiB MiB"
+          Get-ChildItem -Path $packageDir | Select-Object FullName, Length
           Get-Item -LiteralPath $portableArchivePath | Select-Object FullName, Length
 
       - name: Upload Windows release archive
