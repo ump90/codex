@@ -315,14 +315,6 @@ jobs:
           '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "codex.cmd") -Encoding ascii
 
           @'
-          #!/usr/bin/env pwsh
-          $root = $PSScriptRoot
-          $env:PATH = "$root\git\cmd;$root\git\bin;$env:PATH"
-          & "$root\bin\codex.exe" @args
-          exit $LASTEXITCODE
-          '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "codex.ps1") -Encoding utf8
-
-          @'
           Portable Codex for Windows
 
           Add this extracted directory to PATH, then run:
@@ -330,8 +322,8 @@ jobs:
             codex --version
 
           This archive includes Portable Git for Windows under git\. When Codex
-          starts through codex.cmd or codex.ps1, the launcher prepends the bundled
-          git\cmd and git\bin directories to PATH so Codex can find Git Bash.
+          starts through codex.cmd, the launcher prepends the bundled git\cmd and
+          git\bin directories to PATH so Codex can find Git Bash.
 
           Git Bash is Codex's default Windows shell in this fork.
 
