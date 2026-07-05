@@ -583,3 +583,104 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
     );
     assert!(materialized_helper.exists());
 }
+
+#[cfg(target_os = "windows")]
+fn create_git_for_windows_fixture(root: &std::path::Path) {
+    let git = root.join("cmd").join("git.exe");
+    let bash = root.join("bin").join("bash.exe");
+    let msys = root.join("usr").join("bin").join("msys-2.0.dll");
+    for path in [&git, &bash, &msys] {
+        std::fs::create_dir_all(path.parent().expect("fixture path should have parent"))
+            .expect("create fixture parent");
+        std::fs::write(path, b"fixture").expect("write fixture file");
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn transform_for_direct_spawn_windows_preserves_git_bash_runtime_root() {
+    let codex_home = tempfile::TempDir::new().expect("codex home");
+    let fixture = tempfile::TempDir::new().expect("git fixture");
+    let git_root = fixture.path().join("Git");
+    create_git_for_windows_fixture(&git_root);
+    let bash_path = git_root.join("bin").join("bash.exe");
+
+    let workspace = tempfile::TempDir::new().expect("workspace");
+    let cwd = AbsolutePathBuf::from_absolute_path(workspace.path()).expect("absolute cwd");
+    let cwd_uri = PathUri::from_abs_path(&cwd);
+    let permissions = PermissionProfile::from_runtime_permissions(
+        &FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path { path: cwd.clone() },
+                access: FileSystemAccessMode::Read,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path { path: cwd.clone() },
+                access: FileSystemAccessMode::Write,
+            },
+        ]),
+        NetworkSandboxPolicy::Restricted,
+    );
+    let manager = SandboxManager::new();
+
+    let exec_request = manager
+        .transform_for_direct_spawn_with_codex_home(
+            SandboxDirectSpawnTransformRequest {
+                workspace_roots: std::slice::from_ref(&cwd),
+                windows_sandbox_proxy_settings_mode:
+                    codex_windows_sandbox::WindowsSandboxProxySettingsMode::Preserve,
+                transform: SandboxTransformRequest {
+                    command: SandboxCommand {
+                        program: bash_path.as_os_str().to_owned(),
+                        args: vec!["-lc".to_string(), "pwd && ls".to_string()],
+                        cwd: cwd_uri.clone(),
+                        env: HashMap::new(),
+                        managed_network: None,
+                        additional_permissions: None,
+                    },
+                    permissions: &permissions,
+                    sandbox: SandboxType::WindowsRestrictedToken,
+                    enforce_managed_network: false,
+                    environment_id: None,
+                    network: None,
+                    sandbox_policy_cwd: &cwd_uri,
+                    codex_linux_sandbox_exe: None,
+                    use_legacy_landlock: false,
+                    windows_sandbox_level: WindowsSandboxLevel::Elevated,
+                    windows_sandbox_private_desktop: false,
+                },
+            },
+            codex_home.path(),
+        )
+        .expect("transform for direct spawn");
+
+    let separator_index = exec_request
+        .command
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("wrapper argv separator");
+    let inner_program = std::path::PathBuf::from(&exec_request.command[separator_index + 1]);
+    let read_roots_index = exec_request
+        .command
+        .iter()
+        .position(|arg| arg == "--read-roots-json")
+        .expect("read roots override");
+    let read_roots: Vec<std::path::PathBuf> =
+        serde_json::from_str(&exec_request.command[read_roots_index + 1]).expect("read roots json");
+
+    assert_eq!(exec_request.sandbox, SandboxType::None);
+    assert_eq!(inner_program, bash_path);
+    assert_ne!(
+        inner_program.parent().and_then(std::path::Path::file_name),
+        Some(std::ffi::OsStr::new(".sandbox-bin"))
+    );
+    assert_eq!(exec_request.command[separator_index + 2], "-lc");
+    assert_eq!(exec_request.command[separator_index + 3], "pwd && ls");
+    assert!(
+        read_roots
+            .iter()
+            .any(|root| super::windows_paths_eq(root, git_root.as_path())),
+        "expected Git root {} in read roots {read_roots:?}",
+        git_root.display()
+    );
+}

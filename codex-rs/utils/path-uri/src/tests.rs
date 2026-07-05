@@ -755,6 +755,20 @@ fn join_replaces_windows_absolute_path() {
 }
 
 #[test]
+fn join_replaces_git_bash_drive_absolute_path_for_windows_base() {
+    let base = PathUri::parse("file:///C:/workspace/src").expect("valid base URI");
+
+    for (path, expected) in [
+        ("/c/Users/Alice/project", "file:///C:/Users/Alice/project"),
+        ("/d/tmp/test.rs", "file:///D:/tmp/test.rs"),
+        ("/e", "file:///E:/"),
+    ] {
+        let expected = PathUri::parse(expected).expect("valid expected URI");
+        assert_eq!(base.join(path), Ok(expected), "joining {path}");
+    }
+}
+
+#[test]
 fn join_windows_root_relative_path_preserves_drive_or_share() {
     for (base, path, expected) in [
         ("file:///C:/base/dir", r"\Windows", "file:///C:/Windows"),

@@ -4564,6 +4564,14 @@
       },
       "type": "object"
     },
+    "WindowsDefaultShellToml": {
+      "enum": [
+        "powershell",
+        "git-bash",
+        "cmd"
+      ],
+      "type": "string"
+    },
     "WindowsSandboxModeToml": {
       "enum": [
         "elevated",
@@ -4574,6 +4582,18 @@
     "WindowsToml": {
       "additionalProperties": false,
       "properties": {
+        "default_shell": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/WindowsDefaultShellToml"
+            }
+          ],
+          "description": "Preferred default shell for Windows command execution."
+        },
+        "git_bash_path": {
+          "description": "Optional absolute path to Git for Windows `bash.exe`.",
+          "type": "string"
+        },
         "sandbox": {
           "$ref": "#/definitions/WindowsSandboxModeToml"
         },

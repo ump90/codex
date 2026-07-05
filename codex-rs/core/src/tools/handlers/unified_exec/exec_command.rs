@@ -1,8 +1,11 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
+use crate::shell::Shell;
+use crate::shell::get_shell_by_model_provided_path;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -11,6 +14,7 @@ use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::handlers::apply_patch::intercept_apply_patch;
 use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
+use crate::tools::handlers::normalize_git_bash_path_arguments_for_shell;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_tool_environment;
@@ -26,6 +30,7 @@ use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::generate_chunk_id;
+use codex_exec_server::Environment;
 use codex_features::Feature;
 use codex_otel::SessionTelemetry;
 use codex_otel::TOOL_CALL_UNIFIED_EXEC_METRIC;
@@ -35,8 +40,11 @@ use codex_sandboxing::SandboxablePreference;
 use codex_shell_command::shell_detect::detect_shell_type;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use codex_tools::UnifiedExecShellMode;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_path_uri::PathConvention;
+use codex_utils_path_uri::PathUri;
+use serde::Deserialize;
 
 use super::super::shell_spec::CommandToolOptions;
 use super::super::shell_spec::create_exec_command_tool_with_environment_id;
@@ -58,6 +66,12 @@ pub struct ExecCommandHandler {
     options: ExecCommandHandlerOptions,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExecCommandShellArgs {
+    #[serde(default)]
+    shell: Option<String>,
+}
+
 impl Default for ExecCommandHandler {
     fn default() -> Self {
         Self {
@@ -75,6 +89,43 @@ impl ExecCommandHandler {
     pub(crate) fn new(options: ExecCommandHandlerOptions) -> Self {
         Self { options }
     }
+}
+
+pub(super) fn normalize_exec_command_git_bash_path_arguments(
+    arguments: String,
+    default_shell: &Shell,
+    shell_mode: &UnifiedExecShellMode,
+    environment: &Environment,
+    cwd: &PathUri,
+) -> Result<String, FunctionCallError> {
+    let shell_name = path_argument_shell_name_for_exec_command(
+        &arguments,
+        default_shell,
+        shell_mode,
+        environment,
+    )?;
+
+    normalize_git_bash_path_arguments_for_shell(arguments, Some(shell_name), cwd)
+}
+
+fn path_argument_shell_name_for_exec_command(
+    arguments: &str,
+    default_shell: &Shell,
+    shell_mode: &UnifiedExecShellMode,
+    environment: &Environment,
+) -> Result<&'static str, FunctionCallError> {
+    if environment.is_remote() || !matches!(shell_mode, UnifiedExecShellMode::Direct) {
+        return Ok(default_shell.name());
+    }
+
+    let shell_args: ExecCommandShellArgs = parse_arguments(arguments)?;
+    let Some(requested_shell) = shell_args.shell.as_deref() else {
+        return Ok(default_shell.name());
+    };
+
+    get_shell_by_model_provided_path(&PathBuf::from(requested_shell))
+        .map(|shell| shell.name())
+        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
 }
 
 impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
@@ -138,6 +189,24 @@ impl ExecCommandHandler {
                 "unified exec is unavailable in this session".to_string(),
             ));
         };
+        // Remote environments may use a different OS and must build commands with their native
+        // shell; fall back to the session shell when the environment did not report one.
+        let shell = turn_environment
+            .shell
+            .clone()
+            .map(Arc::new)
+            .unwrap_or_else(|| session.user_shell());
+        let environment = Arc::clone(&turn_environment.environment);
+        let shell_mode =
+            shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
+        let arguments = normalize_exec_command_git_bash_path_arguments(
+            arguments,
+            shell.as_ref(),
+            &shell_mode,
+            environment.as_ref(),
+            turn_environment.cwd(),
+        )?;
+        let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
         let native_environment_cwd = turn_environment.cwd().clone();
         let cwd = environment_args
             .workdir
@@ -148,7 +217,6 @@ impl ExecCommandHandler {
                 |workdir| native_environment_cwd.join(workdir),
             )
             .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
-        let environment = Arc::clone(&turn_environment.environment);
         let fs = environment.get_filesystem();
 
         // A foreign cwd cannot seed the AbsolutePathBufGuard used to resolve relative paths in the
@@ -200,15 +268,6 @@ impl ExecCommandHandler {
             )
             .await;
         }
-        let shell_mode =
-            shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
-        // Remote environments may use a different OS and must build commands with their native
-        // shell; fall back to the session shell when the environment did not report one.
-        let shell = turn_environment
-            .shell
-            .clone()
-            .map(Arc::new)
-            .unwrap_or_else(|| session.user_shell());
         // TODO(anp): Resolve requested shells in remote environments instead of restricting
         // commands to the reported default shell.
         if environment.is_remote()

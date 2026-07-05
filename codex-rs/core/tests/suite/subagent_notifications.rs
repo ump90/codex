@@ -352,6 +352,27 @@ async fn wait_for_requests(
     }
 }
 
+async fn wait_for_request_matching(
+    mock: &core_test_support::responses::ResponseMock,
+    description: &str,
+    predicate: impl Fn(&ResponsesRequest) -> bool,
+) -> Result<ResponsesRequest> {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let requests = mock.requests();
+        if let Some(request) = requests.iter().find(|request| predicate(request)) {
+            return Ok(request.clone());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "expected request matching {description}, got {} captured requests",
+                requests.len()
+            );
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn setup_turn_one_with_spawned_child(
     server: &MockServer,
     child_response_delay: Option<Duration>,
@@ -715,8 +736,19 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         .await?;
 
     test.submit_turn(TURN_1_PROMPT).await?;
-    let _ = wait_for_requests(&first_child_request).await?;
-    let _ = wait_for_requests(&second_child_request).await?;
+    let _ = wait_for_request_matching(&first_child_request, CHILD_PROMPT, |request| {
+        request.body_contains_text(CHILD_PROMPT) && !request.body_contains_text(SPAWN_CALL_ID)
+    })
+    .await?;
+    let _ = wait_for_request_matching(
+        &second_child_request,
+        SUBAGENT_STOP_CONTINUATION,
+        |request| {
+            request.body_contains_text(SUBAGENT_STOP_CONTINUATION)
+                && !request.body_contains_text(SPAWN_CALL_ID)
+        },
+    )
+    .await?;
 
     let subagent_stop_inputs = wait_for_hook_log(
         test.codex_home_path(),

@@ -25,6 +25,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -141,6 +142,16 @@ pub enum WindowsSandboxModeToml {
     Unelevated,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+pub enum WindowsDefaultShellToml {
+    #[serde(rename = "powershell")]
+    PowerShell,
+    #[serde(rename = "git-bash")]
+    GitBash,
+    #[serde(rename = "cmd")]
+    Cmd,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
@@ -148,6 +159,10 @@ pub struct WindowsToml {
     /// Defaults to `true`. Set to `false` to launch the final sandboxed child
     /// process on `Winsta0\\Default` instead of a private desktop.
     pub sandbox_private_desktop: Option<bool>,
+    /// Preferred default shell for Windows command execution.
+    pub default_shell: Option<WindowsDefaultShellToml>,
+    /// Optional absolute path to Git for Windows `bash.exe`.
+    pub git_bash_path: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, JsonSchema)]

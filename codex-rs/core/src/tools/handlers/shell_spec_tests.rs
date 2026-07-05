@@ -45,7 +45,7 @@ fn exec_command_tool_matches_expected_spec() {
         (
             "shell".to_string(),
             JsonSchema::string(Some(
-                    "Shell binary to launch. Defaults to the user's default shell.".to_string(),
+                    "Shell binary to launch. Defaults to the user's default shell from <environment_context><shell>. On Windows, pass an absolute Git for Windows bash.exe path when explicitly selecting Git Bash.".to_string(),
                 )),
         ),
         (
@@ -207,16 +207,15 @@ fn shell_command_tool_matches_expected_spec() {
     });
 
     let description = if cfg!(windows) {
-        r#"Runs a Powershell command (Windows) and returns its output.
+        r#"Runs a command in the user's default Windows shell and returns its output.
 
-Examples of valid command strings:
+Use the shell shown in <environment_context><shell>:
 
-- ls -a (show hidden): "Get-ChildItem -Force"
-- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"
-- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"
-- ps aux | grep python: "Get-Process | Where-Object { $_.ProcessName -like '*python*' }"
-- setting an env var: "$env:FOO='bar'; echo $env:FOO"
-- running an inline Python script: "@'\\nprint('Hello, world!')\\n'@ | python -""#
+- Git Bash/bash: "ls -la", "find . -name '*.py'", "rg TODO", "FOO=bar python - <<'PY'\nprint('Hello, world!')\nPY"
+- PowerShell: "Get-ChildItem -Force", "Get-ChildItem -Recurse -Filter *.py", "$env:FOO='bar'; echo $env:FOO"
+- cmd: "dir /a", "dir /s /b *.py", "set FOO=bar && echo %FOO%"
+
+Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#
             .to_string()
             + &windows_shell_guidance_description()
     } else {

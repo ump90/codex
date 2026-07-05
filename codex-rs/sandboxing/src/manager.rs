@@ -12,6 +12,8 @@ use crate::resolve_windows_elevated_filesystem_overrides;
 #[cfg(target_os = "windows")]
 use crate::resolve_windows_restricted_token_filesystem_overrides;
 #[cfg(target_os = "windows")]
+use crate::windows::WindowsSandboxFilesystemOverrides;
+#[cfg(target_os = "windows")]
 use crate::windows_sandbox_uses_elevated_backend;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkProxy;
@@ -527,14 +529,31 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
         ));
     };
     let source = std::path::PathBuf::from(&program);
-    let helper = codex_windows_sandbox::resolve_exe_for_launch(source.as_path(), codex_home);
+    let git_bash_root =
+        codex_shell_command::shell_detect::git_for_windows_install_root_from_bash(source.as_path());
+    let (launcher, helper) = if git_bash_root.is_some() {
+        let current_exe = std::env::current_exe().map_err(|err| {
+            SandboxTransformError::WindowsSandboxPreparation(format!(
+                "failed to resolve current executable for Windows sandbox wrapper: {err}"
+            ))
+        })?;
+        (
+            codex_windows_sandbox::resolve_exe_for_launch(&current_exe, codex_home),
+            source,
+        )
+    } else {
+        (
+            source.clone(),
+            codex_windows_sandbox::resolve_exe_for_launch(source.as_path(), codex_home),
+        )
+    };
     *program = helper.to_string_lossy().into_owned();
 
     let inner_command = std::mem::take(&mut request.command);
     let proxy_enforced = request.network.is_some();
     let use_elevated =
         windows_sandbox_uses_elevated_backend(request.windows_sandbox_level, proxy_enforced);
-    let overrides = if use_elevated {
+    let mut overrides = if use_elevated {
         resolve_windows_elevated_filesystem_overrides(
             request.sandbox,
             &request.permission_profile,
@@ -550,6 +569,9 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
         )
     }
     .map_err(SandboxTransformError::WindowsSandboxPreparation)?;
+    if let Some(git_bash_root) = git_bash_root.as_ref() {
+        add_git_bash_root_to_read_roots_override(&mut overrides, git_bash_root);
+    }
     let empty_paths: &[AbsolutePathBuf] = &[];
     let read_roots_override = overrides
         .as_ref()
@@ -586,12 +608,39 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
         );
 
     request.command = Vec::with_capacity(1 + wrapper_args.len());
-    request.command.push(source.to_string_lossy().into_owned());
+    request
+        .command
+        .push(launcher.to_string_lossy().into_owned());
     request.command.append(&mut wrapper_args);
     request.sandbox = SandboxType::None;
     request.arg0 = None;
     add_windows_sandbox_wrapper_setup_env(&mut request.env);
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn add_git_bash_root_to_read_roots_override(
+    overrides: &mut Option<WindowsSandboxFilesystemOverrides>,
+    git_bash_root: &Path,
+) {
+    let Some(overrides) = overrides.as_mut() else {
+        return;
+    };
+    let Some(read_roots) = overrides.read_roots_override.as_mut() else {
+        return;
+    };
+    if !read_roots
+        .iter()
+        .any(|path| windows_paths_eq(path, git_bash_root))
+    {
+        read_roots.push(git_bash_root.to_path_buf());
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_paths_eq(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(right.to_string_lossy().as_ref())
 }
 
 #[cfg(target_os = "windows")]

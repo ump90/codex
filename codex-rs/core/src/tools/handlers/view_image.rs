@@ -16,6 +16,7 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use crate::tools::handlers::normalize_git_bash_path_argument_for_shell;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
@@ -140,6 +141,16 @@ impl ViewImageHandler {
                 "view_image is unavailable in this session".to_string(),
             ));
         };
+        let session_shell = session.user_shell();
+        let shell_name = turn_environment
+            .shell
+            .as_ref()
+            .map_or_else(|| session_shell.name(), |shell| shell.name());
+        let path = normalize_git_bash_path_argument_for_shell(
+            path,
+            Some(shell_name),
+            turn_environment.cwd(),
+        );
         let path_uri = turn_environment.cwd().join(&path).map_err(|err| {
             FunctionCallError::RespondToModel(format!(
                 "unable to resolve image path `{path}` against environment cwd `{}`: {err}",

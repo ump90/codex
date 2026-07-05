@@ -137,4 +137,6 @@ mod web_search;
 mod websocket_fallback;
 mod window_headers;
 #[cfg(target_os = "windows")]
+mod windows_git_bash;
+#[cfg(target_os = "windows")]
 mod windows_sandbox;

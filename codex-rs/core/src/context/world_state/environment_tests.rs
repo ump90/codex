@@ -123,6 +123,7 @@ fn persisted_turn_context_values_render_a_diff() -> Result<()> {
         filesystem: Some(FileSystemContext::from_permission_profile(
             &PermissionProfile::Disabled,
             &[],
+            PathDisplayStyle::Native,
         )),
         ..environments.clone()
     });
@@ -139,6 +140,7 @@ fn persisted_turn_context_values_render_a_diff() -> Result<()> {
                 network: NetworkSandboxPolicy::Restricted,
             },
             &[],
+            PathDisplayStyle::Native,
         )),
         ..environments
     });
@@ -170,6 +172,7 @@ fn persisted_snapshot_uses_model_visible_path_and_context_values() -> Result<()>
         filesystem: Some(FileSystemContext::from_permission_profile(
             &PermissionProfile::Disabled,
             &[],
+            PathDisplayStyle::Native,
         )),
         ..Default::default()
     });
@@ -201,6 +204,7 @@ fn single_environment_diff_ignores_unknown_shell() -> Result<()> {
                 cwd: PathUri::parse("file:///repo")?,
                 status: EnvironmentStatus::Available,
                 shell: None,
+                path_display_style: PathDisplayStyle::Native,
             },
         )]
         .into_iter()
@@ -258,8 +262,10 @@ fn removed_legacy_environment_renders_unavailable() -> Result<()> {
 }
 
 fn available(cwd: &str, shell: &str) -> Result<EnvironmentState> {
+    let cwd = PathUri::parse(cwd)?;
     Ok(EnvironmentState {
-        cwd: PathUri::parse(cwd)?,
+        path_display_style: path_display_style_for_shell(Some(shell), &cwd),
+        cwd,
         status: EnvironmentStatus::Available,
         shell: Some(shell.to_string()),
     })
@@ -270,6 +276,7 @@ fn starting(cwd: &str) -> Result<EnvironmentState> {
         cwd: PathUri::parse(cwd)?,
         status: EnvironmentStatus::Starting,
         shell: None,
+        path_display_style: PathDisplayStyle::Native,
     })
 }
 

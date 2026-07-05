@@ -8,10 +8,15 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::git_bash_paths::PathDisplayStyle;
+use crate::git_bash_paths::format_native_path_for_shell;
+use crate::git_bash_paths::format_path_text_for_shell;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSystemContext {
     workspace_roots: Vec<String>,
     permission_profile: FileSystemPermissionProfileContext,
+    path_display_style: PathDisplayStyle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,13 +39,14 @@ impl FileSystemContext {
     pub(super) fn from_permission_profile(
         permission_profile: &PermissionProfile,
         workspace_roots: &[AbsolutePathBuf],
+        path_display_style: PathDisplayStyle,
     ) -> Self {
         let permission_profile = permission_profile
             .clone()
             .materialize_project_roots_with_workspace_roots(workspace_roots);
         let workspace_roots = workspace_roots
             .iter()
-            .map(|root| root.to_string_lossy().into_owned())
+            .map(|root| format_native_path_for_shell(root.as_path(), path_display_style))
             .collect();
         let permission_profile = match permission_profile {
             PermissionProfile::Managed { file_system, .. } => {
@@ -54,6 +60,7 @@ impl FileSystemContext {
         Self {
             workspace_roots,
             permission_profile,
+            path_display_style,
         }
     }
 
@@ -66,7 +73,8 @@ impl FileSystemContext {
             }
             rendered.push_str("</workspace_roots>");
         }
-        self.permission_profile.render(&mut rendered);
+        self.permission_profile
+            .render(&mut rendered, self.path_display_style);
         rendered.push_str("</filesystem>");
         rendered
     }
@@ -91,11 +99,11 @@ impl From<ManagedFileSystemPermissions> for ManagedFileSystemContext {
 }
 
 impl FileSystemPermissionProfileContext {
-    fn render(&self, rendered: &mut String) {
+    fn render(&self, rendered: &mut String, path_display_style: PathDisplayStyle) {
         match self {
             Self::Managed(file_system) => {
                 rendered.push_str("<permission_profile type=\"managed\">");
-                file_system.render(rendered);
+                file_system.render(rendered, path_display_style);
                 rendered.push_str("</permission_profile>");
             }
             Self::Disabled => {
@@ -113,7 +121,7 @@ impl FileSystemPermissionProfileContext {
 }
 
 impl ManagedFileSystemContext {
-    fn render(&self, rendered: &mut String) {
+    fn render(&self, rendered: &mut String, path_display_style: PathDisplayStyle) {
         match self {
             Self::Restricted {
                 entries,
@@ -130,7 +138,7 @@ impl ManagedFileSystemContext {
                 }
                 rendered.push('>');
                 for entry in entries {
-                    render_file_system_entry(rendered, entry);
+                    render_file_system_entry(rendered, entry, path_display_style);
                 }
                 rendered.push_str("</file_system>");
             }
@@ -141,7 +149,11 @@ impl ManagedFileSystemContext {
     }
 }
 
-fn render_file_system_entry(rendered: &mut String, entry: &FileSystemSandboxEntry) {
+fn render_file_system_entry(
+    rendered: &mut String,
+    entry: &FileSystemSandboxEntry,
+    path_display_style: PathDisplayStyle,
+) {
     rendered.push_str("<entry access=\"");
     let access = entry.access.to_string();
     rendered.push_str(&access);
@@ -151,37 +163,50 @@ fn render_file_system_entry(rendered: &mut String, entry: &FileSystemSandboxEntr
     rendered.push_str("\">");
     match &entry.path {
         FileSystemPath::Path { path } => {
-            push_text_element(rendered, "path", path.to_string_lossy().as_ref());
+            let path = format_native_path_for_shell(path.as_path(), path_display_style);
+            push_text_element(rendered, "path", &path);
         }
         FileSystemPath::GlobPattern { pattern } => {
-            push_text_element(rendered, "glob", pattern);
+            let pattern = format_path_text_for_shell(pattern, path_display_style);
+            push_text_element(rendered, "glob", &pattern);
         }
         FileSystemPath::Special { value } => {
-            let value = render_special_path(value);
+            let value = render_special_path(value, path_display_style);
             push_text_element(rendered, "special", &value);
         }
     }
     rendered.push_str("</entry>");
 }
 
-fn render_special_path(value: &FileSystemSpecialPath) -> String {
+fn render_special_path(
+    value: &FileSystemSpecialPath,
+    path_display_style: PathDisplayStyle,
+) -> String {
     match value {
         FileSystemSpecialPath::Root => ":root".to_string(),
         FileSystemSpecialPath::Minimal => ":minimal".to_string(),
         FileSystemSpecialPath::ProjectRoots { subpath } => {
-            render_special_path_with_subpath(":workspace_roots", subpath)
+            render_special_path_with_subpath(":workspace_roots", subpath, path_display_style)
         }
         FileSystemSpecialPath::Tmpdir => ":tmpdir".to_string(),
         FileSystemSpecialPath::SlashTmp => ":slash_tmp".to_string(),
         FileSystemSpecialPath::Unknown { path, subpath } => {
-            render_special_path_with_subpath(path, subpath)
+            render_special_path_with_subpath(path, subpath, path_display_style)
         }
     }
 }
 
-fn render_special_path_with_subpath(base: &str, subpath: &Option<PathBuf>) -> String {
+fn render_special_path_with_subpath(
+    base: &str,
+    subpath: &Option<PathBuf>,
+    path_display_style: PathDisplayStyle,
+) -> String {
     match subpath {
-        Some(subpath) => format!("{base}/{}", subpath.display()),
+        Some(subpath) => {
+            let subpath =
+                format_path_text_for_shell(&subpath.to_string_lossy(), path_display_style);
+            format!("{base}/{subpath}")
+        }
         None => base.to_string(),
     }
 }
