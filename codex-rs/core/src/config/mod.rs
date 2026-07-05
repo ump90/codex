@@ -2255,8 +2255,8 @@ fn resolve_windows_git_bash_config(
 ) -> std::io::Result<Option<GitBashShell>> {
     if !cfg!(windows)
         || !matches!(
-            windows_default_shell,
-            Some(WindowsDefaultShellToml::GitBash)
+            windows_default_shell.unwrap_or(WindowsDefaultShellToml::GitBash),
+            WindowsDefaultShellToml::GitBash
         )
     {
         return Ok(None);
@@ -3781,8 +3781,8 @@ impl Config {
             helper_readable_roots.push(memories_root);
         }
         if matches!(
-            windows_default_shell,
-            Some(WindowsDefaultShellToml::GitBash)
+            windows_default_shell.unwrap_or(WindowsDefaultShellToml::GitBash),
+            WindowsDefaultShellToml::GitBash
         ) && let Some(git_bash_root) = windows_git_bash_root
             .as_ref()
             .and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok())

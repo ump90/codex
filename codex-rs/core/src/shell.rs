@@ -104,8 +104,8 @@ pub fn default_user_shell_for_windows_config(
         return Ok(default_user_shell());
     }
 
-    match default_shell {
-        Some(WindowsDefaultShellToml::GitBash) => {
+    match default_shell.unwrap_or(WindowsDefaultShellToml::GitBash) {
+        WindowsDefaultShellToml::GitBash => {
             let path_hint = match git_bash_path {
                 Some(path) => GitBashPathHint::Configured(path.as_path()),
                 None => GitBashPathHint::SearchPath,
@@ -114,14 +114,13 @@ pub fn default_user_shell_for_windows_config(
                 .map(|git_bash| git_bash.shell.into())
                 .map_err(|err| anyhow::anyhow!("{err}"))
         }
-        Some(WindowsDefaultShellToml::PowerShell) => {
+        WindowsDefaultShellToml::PowerShell => {
             Ok(get_shell(ShellType::PowerShell, /*path*/ None)
                 .unwrap_or_else(ultimate_fallback_shell))
         }
-        Some(WindowsDefaultShellToml::Cmd) => {
+        WindowsDefaultShellToml::Cmd => {
             Ok(get_shell(ShellType::Cmd, /*path*/ None).unwrap_or_else(ultimate_fallback_shell))
         }
-        None => Ok(default_user_shell()),
     }
 }
 

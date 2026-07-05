@@ -1182,7 +1182,7 @@ async fn user_shell_commands_do_not_inherit_managed_network_proxy() -> anyhow::R
     assert!(turn_context.network.is_some());
 
     #[cfg(windows)]
-    let command = r#"$val = $env:HTTP_PROXY; if ([string]::IsNullOrEmpty($val)) { $val = 'not-set' } ; [System.Console]::Write($val)"#.to_string();
+    let command = r#"printf '%s' "${HTTP_PROXY:-not-set}""#.to_string();
     #[cfg(not(windows))]
     let command = r#"sh -c "printf '%s' \"${HTTP_PROXY:-not-set}\"""#.to_string();
 

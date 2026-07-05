@@ -176,13 +176,17 @@ fn http_mcp(url: &str) -> McpServerConfig {
 
 #[test]
 #[cfg(windows)]
-fn windows_git_bash_path_is_validated_only_when_selected() {
+fn windows_git_bash_path_is_validated_by_default_unless_another_shell_is_selected() {
     let missing_bash = std::path::PathBuf::from(r"C:\missing\Git\bin\bash.exe");
 
-    assert_eq!(
-        resolve_windows_git_bash_config(None, Some(&missing_bash)).expect("config should load"),
-        None
+    let err = resolve_windows_git_bash_config(None, Some(&missing_bash))
+        .expect_err("default Git Bash should validate the configured path");
+    assert!(
+        err.to_string()
+            .contains("invalid Windows shell configuration"),
+        "unexpected error: {err}"
     );
+
     assert_eq!(
         resolve_windows_git_bash_config(
             Some(WindowsDefaultShellToml::PowerShell),
@@ -1280,6 +1284,10 @@ async fn permissions_profiles_proxy_policy_does_not_start_managed_network_proxy_
     let config = Config::load_from_base_config_with_overrides(
         ConfigToml {
             default_permissions: Some("dev".to_string()),
+            windows: Some(WindowsToml {
+                default_shell: Some(WindowsDefaultShellToml::PowerShell),
+                ..Default::default()
+            }),
             permissions: Some(PermissionsToml {
                 entries: BTreeMap::from([(
                     "dev".to_string(),
@@ -1889,6 +1897,10 @@ async fn default_permissions_profile_populates_runtime_sandbox_policy() -> std::
 
     let cfg = ConfigToml {
         default_permissions: Some("dev".to_string()),
+        windows: Some(WindowsToml {
+            default_shell: Some(WindowsDefaultShellToml::PowerShell),
+            ..Default::default()
+        }),
         permissions: Some(PermissionsToml {
             entries: BTreeMap::from([(
                 "dev".to_string(),
@@ -3308,6 +3320,10 @@ async fn load_workspace_permission_profile(
     Config::load_from_base_config_with_overrides(
         ConfigToml {
             default_permissions: Some("dev".to_string()),
+            windows: Some(WindowsToml {
+                default_shell: Some(WindowsDefaultShellToml::PowerShell),
+                ..Default::default()
+            }),
             permissions: Some(PermissionsToml {
                 entries: BTreeMap::from([("dev".to_string(), profile)]),
             }),

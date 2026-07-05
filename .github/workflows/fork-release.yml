@@ -333,12 +333,7 @@ jobs:
           starts through codex.cmd or codex.ps1, the launcher prepends the bundled
           git\cmd and git\bin directories to PATH so Codex can find Git Bash.
 
-          To use Git Bash as Codex's default Windows shell, add this to:
-
-            %USERPROFILE%\.codex\config.toml
-
-          [windows]
-          default_shell = "git-bash"
+          Git Bash is Codex's default Windows shell in this fork.
 
           You can also add the bin directory to PATH and run codex.exe directly.
           In that case, add git\cmd to PATH yourself or set windows.git_bash_path

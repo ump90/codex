@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_config::types::WindowsDefaultShellToml;
 use codex_core::CodexThread;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -207,14 +208,18 @@ pub async fn load_default_config_for_test_with_cloud_config_bundle(
     codex_home: &TempDir,
     cloud_config_bundle: CloudConfigBundleLoader,
 ) -> Config {
-    ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(codex_home.path().to_path_buf())
         .harness_overrides(default_test_overrides())
         .cloud_config_bundle(cloud_config_bundle)
         .build()
         .await
-        .expect("defaults for test should always succeed")
+        .expect("defaults for test should always succeed");
+    if cfg!(windows) && config.windows_default_shell.is_none() {
+        config.windows_default_shell = Some(WindowsDefaultShellToml::PowerShell);
+    }
+    config
 }
 
 pub fn managed_network_requirements_loader() -> CloudConfigBundleLoader {

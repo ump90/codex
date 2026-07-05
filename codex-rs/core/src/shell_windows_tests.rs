@@ -50,16 +50,13 @@ fn create_git_for_windows_fixture(root: &Path) -> std::io::Result<()> {
 }
 
 #[test]
-fn default_user_shell_for_windows_config_uses_configured_git_bash() -> anyhow::Result<()> {
+fn default_user_shell_for_windows_config_uses_git_bash_by_default() -> anyhow::Result<()> {
     let fixture = TempFixture::new("git-bash-default")?;
     let git_root = fixture.path().join("Git");
     create_git_for_windows_fixture(&git_root)?;
     let bash_path = git_root.join("bin").join("bash.exe");
 
-    let shell = default_user_shell_for_windows_config(
-        Some(WindowsDefaultShellToml::GitBash),
-        Some(&bash_path),
-    )?;
+    let shell = default_user_shell_for_windows_config(None, Some(&bash_path))?;
 
     assert_eq!(
         shell,
