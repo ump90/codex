@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to create or update, for example 0.143.0-alpha.35-gitbash."
+        description: "Release tag to create or update. Also sets the Cargo version, after stripping v/rust-v prefixes."
         required: true
         type: string
       ref:
@@ -53,6 +53,7 @@ jobs:
       ref_sha: ${{ steps.metadata.outputs.ref_sha }}
       release_name: ${{ steps.metadata.outputs.release_name }}
       release_tag: ${{ steps.metadata.outputs.release_tag }}
+      release_version: ${{ steps.metadata.outputs.release_version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -77,6 +78,14 @@ jobs:
           git check-ref-format "refs/tags/${RELEASE_TAG}"
 
           ref_sha="$(git rev-parse HEAD)"
+          release_version="${RELEASE_TAG#rust-v}"
+          release_version="${release_version#v}"
+          if [[ ! "${release_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "release_tag must resolve to a Cargo-compatible SemVer version. Got: ${RELEASE_TAG}" >&2
+            echo "Use a tag like 0.143.0-alpha.35-gitbash, v0.143.0, or rust-v0.143.0." >&2
+            exit 1
+          fi
+
           if [[ -z "${RELEASE_NAME}" ]]; then
             RELEASE_NAME="${RELEASE_TAG}"
           fi
@@ -85,6 +94,7 @@ jobs:
             echo "ref_sha=${ref_sha}"
             echo "release_name=${RELEASE_NAME}"
             echo "release_tag=${RELEASE_TAG}"
+            echo "release_version=${release_version}"
           } >> "$GITHUB_OUTPUT"
 
   build-windows:
@@ -130,6 +140,40 @@ jobs:
         uses: ./.github/actions/setup-msvc-env
         with:
           target: ${{ matrix.target }}
+
+      - name: Set Cargo release version
+        shell: pwsh
+        run: |
+          $version = "${{ needs.metadata.outputs.release_version }}"
+          $cargoToml = "Cargo.toml"
+          $lines = @(Get-Content -LiteralPath $cargoToml)
+          $inWorkspacePackage = $false
+          $updated = $false
+
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            $trimmed = $lines[$i].Trim()
+            if ($trimmed -eq "[workspace.package]") {
+              $inWorkspacePackage = $true
+              continue
+            }
+
+            if ($inWorkspacePackage -and $trimmed.StartsWith("[")) {
+              break
+            }
+
+            if ($inWorkspacePackage -and $lines[$i] -match '^\s*version\s*=') {
+              $lines[$i] = "version = `"$version`""
+              $updated = $true
+              break
+            }
+          }
+
+          if (-not $updated) {
+            throw "Could not find [workspace.package].version in $cargoToml"
+          }
+
+          Set-Content -LiteralPath $cargoToml -Value $lines -Encoding utf8
+          Write-Host "Set [workspace.package].version to $version"
 
       - name: Cargo build Windows binaries
         shell: pwsh
