@@ -64,6 +64,7 @@ use codex_config::types::Tui;
 use codex_config::types::TuiKeymap;
 use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
+use codex_config::types::WindowsDefaultShellToml;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_config::types::WindowsToml;
 use codex_core_plugins::PluginsManager;
@@ -171,6 +172,36 @@ fn http_mcp(url: &str) -> McpServerConfig {
         oauth_resource: None,
         tools: HashMap::new(),
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_git_bash_path_is_validated_only_when_selected() {
+    let missing_bash = std::path::PathBuf::from(r"C:\missing\Git\bin\bash.exe");
+
+    assert_eq!(
+        resolve_windows_git_bash_config(None, Some(&missing_bash)).expect("config should load"),
+        None
+    );
+    assert_eq!(
+        resolve_windows_git_bash_config(
+            Some(WindowsDefaultShellToml::PowerShell),
+            Some(&missing_bash),
+        )
+        .expect("config should load"),
+        None
+    );
+
+    let err = resolve_windows_git_bash_config(
+        Some(WindowsDefaultShellToml::GitBash),
+        Some(&missing_bash),
+    )
+    .expect_err("selected Git Bash should validate the configured path");
+    assert!(
+        err.to_string()
+            .contains("invalid Windows shell configuration"),
+        "unexpected error: {err}"
+    );
 }
 
 async fn derive_legacy_sandbox_policy_for_test(

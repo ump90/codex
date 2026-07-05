@@ -3857,6 +3857,7 @@ dependencies = [
  "anyhow",
  "codex-network-proxy",
  "codex-protocol",
+ "codex-shell-command",
  "codex-utils-absolute-path",
  "codex-utils-home-dir",
  "codex-utils-path-uri",

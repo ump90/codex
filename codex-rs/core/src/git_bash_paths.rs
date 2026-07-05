@@ -38,6 +38,9 @@ pub(crate) fn format_path_text_for_shell(path: &str, style: PathDisplayStyle) ->
     match style {
         PathDisplayStyle::Native => path.to_string(),
         PathDisplayStyle::GitBash => {
+            if is_windows_namespace_path(path) {
+                return path.to_string();
+            }
             windows_path_to_git_bash_path(path).unwrap_or_else(|| path.replace('\\', "/"))
         }
     }
@@ -90,9 +93,24 @@ fn windows_path_to_git_bash_path(path: &str) -> Option<String> {
 }
 
 fn windows_unc_path_to_git_bash_path(path: &str) -> Option<String> {
+    if is_windows_namespace_path(path) {
+        return None;
+    }
     let path = path.strip_prefix(r"\\")?;
     let path = path.replace('\\', "/");
     Some(format!("//{path}"))
+}
+
+fn is_windows_namespace_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    matches!(
+        bytes,
+        [first, second, namespace @ (b'.' | b'?'), separator, ..]
+            if is_windows_separator(*first)
+                && is_windows_separator(*second)
+                && is_windows_separator(*separator)
+                && matches!(*namespace, b'.' | b'?')
+    )
 }
 
 fn is_windows_separator(byte: u8) -> bool {
@@ -191,6 +209,18 @@ mod tests {
         assert_eq!(
             format_path_text_for_shell(r"relative\path", PathDisplayStyle::GitBash),
             "relative/path"
+        );
+    }
+
+    #[test]
+    fn leaves_windows_namespace_paths_native_for_git_bash() {
+        assert_eq!(
+            format_path_text_for_shell(r"\\?\C:\Users\Alice", PathDisplayStyle::GitBash),
+            r"\\?\C:\Users\Alice"
+        );
+        assert_eq!(
+            format_path_text_for_shell(r"\\.\C:\Users\Alice", PathDisplayStyle::GitBash),
+            r"\\.\C:\Users\Alice"
         );
     }
 

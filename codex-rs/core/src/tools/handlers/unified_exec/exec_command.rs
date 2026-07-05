@@ -119,10 +119,13 @@ fn path_argument_shell_name_for_exec_command(
     }
 
     let shell_args: ExecCommandShellArgs = parse_arguments(arguments)?;
-    Ok(shell_args.shell.as_deref().map_or_else(
-        || default_shell.name(),
-        |requested_shell| get_shell_by_model_provided_path(&PathBuf::from(requested_shell)).name(),
-    ))
+    let Some(requested_shell) = shell_args.shell.as_deref() else {
+        return Ok(default_shell.name());
+    };
+
+    get_shell_by_model_provided_path(&PathBuf::from(requested_shell))
+        .map(|shell| shell.name())
+        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
 }
 
 impl ToolExecutor<ToolInvocation> for ExecCommandHandler {

@@ -2254,10 +2254,10 @@ fn resolve_windows_git_bash_config(
     configured_git_bash_path: Option<&PathBuf>,
 ) -> std::io::Result<Option<GitBashShell>> {
     if !cfg!(windows)
-        || (!matches!(
+        || !matches!(
             windows_default_shell,
             Some(WindowsDefaultShellToml::GitBash)
-        ) && configured_git_bash_path.is_none())
+        )
     {
         return Ok(None);
     }
@@ -3682,8 +3682,7 @@ impl Config {
         )?;
         let windows_git_bash_path = windows_git_bash
             .as_ref()
-            .map(|git_bash| git_bash.shell.shell_path.clone())
-            .or(configured_windows_git_bash_path);
+            .map(|git_bash| git_bash.shell.shell_path.clone());
         let windows_git_bash_root = windows_git_bash
             .as_ref()
             .map(|git_bash| git_bash.installation_root.clone());

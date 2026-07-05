@@ -29,8 +29,6 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
-#[cfg(target_os = "windows")]
-use std::path::PathBuf;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_SANDBOX_WRAPPER_SETUP_ENV_ALLOWLIST: &[&str] = &["USERNAME", "USERPROFILE"];
@@ -531,10 +529,16 @@ fn wrap_windows_sandbox_exec_request_for_direct_spawn(
         ));
     };
     let source = std::path::PathBuf::from(&program);
-    let git_bash_root = git_for_windows_install_root_from_bash(source.as_path());
+    let git_bash_root =
+        codex_shell_command::shell_detect::git_for_windows_install_root_from_bash(source.as_path());
     let (launcher, helper) = if git_bash_root.is_some() {
+        let current_exe = std::env::current_exe().map_err(|err| {
+            SandboxTransformError::WindowsSandboxPreparation(format!(
+                "failed to resolve current executable for Windows sandbox wrapper: {err}"
+            ))
+        })?;
         (
-            codex_windows_sandbox::resolve_current_exe_for_launch(codex_home, "codex.exe"),
+            codex_windows_sandbox::resolve_exe_for_launch(&current_exe, codex_home),
             source,
         )
     } else {
@@ -631,47 +635,6 @@ fn add_git_bash_root_to_read_roots_override(
     {
         read_roots.push(git_bash_root.to_path_buf());
     }
-}
-
-#[cfg(target_os = "windows")]
-fn git_for_windows_install_root_from_bash(shell_path: &Path) -> Option<PathBuf> {
-    if !path_file_stem_eq(shell_path, "bash") {
-        return None;
-    }
-
-    let parent = shell_path.parent()?;
-    let root = if path_file_name_eq(parent, "bin") {
-        let grandparent = parent.parent()?;
-        if path_file_name_eq(grandparent, "usr") {
-            grandparent.parent()?.to_path_buf()
-        } else {
-            grandparent.to_path_buf()
-        }
-    } else {
-        return None;
-    };
-
-    let git = root.join("cmd").join("git.exe");
-    let msys = root.join("usr").join("bin").join("msys-2.0.dll");
-    if git.is_file() && msys.is_file() {
-        Some(root)
-    } else {
-        None
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn path_file_stem_eq(path: &Path, expected: &str) -> bool {
-    path.file_stem()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
-}
-
-#[cfg(target_os = "windows")]
-fn path_file_name_eq(path: &Path, expected: &str) -> bool {
-    path.file_name()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
 #[cfg(target_os = "windows")]

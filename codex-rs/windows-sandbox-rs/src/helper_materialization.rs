@@ -94,7 +94,14 @@ pub(crate) fn resolve_helper_for_launch(
 pub fn resolve_current_exe_for_launch(codex_home: &Path, fallback_executable: &str) -> PathBuf {
     let source = match std::env::current_exe() {
         Ok(path) => path,
-        Err(_) => return PathBuf::from(fallback_executable),
+        Err(_) => {
+            let fallback = PathBuf::from(fallback_executable);
+            if fallback.is_absolute() {
+                fallback
+            } else {
+                helper_bin_dir(codex_home).join(fallback)
+            }
+        }
     };
     resolve_exe_for_launch(&source, codex_home)
 }

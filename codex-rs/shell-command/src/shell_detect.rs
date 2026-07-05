@@ -86,6 +86,27 @@ impl std::fmt::Display for GitBashDiscoveryError {
 
 impl std::error::Error for GitBashDiscoveryError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellResolutionError {
+    message: String,
+}
+
+impl ShellResolutionError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ShellResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ShellResolutionError {}
+
 pub fn find_git_bash_shell(
     path_hint: GitBashPathHint<'_>,
 ) -> Result<GitBashShell, GitBashDiscoveryError> {
@@ -250,14 +271,7 @@ const BASH_FALLBACK_PATHS: &[&str] = &["/bin/bash", "/usr/bin/bash"];
 
 #[cfg(windows)]
 fn get_bash_shell(path: Option<&PathBuf>) -> Option<DetectedShell> {
-    let path_hint = match path {
-        Some(path) if path.components().count() > 1 || path.is_absolute() => {
-            GitBashPathHint::Configured(path.as_path())
-        }
-        Some(_) | None => GitBashPathHint::SearchPath,
-    };
-
-    find_git_bash_shell(path_hint)
+    find_git_bash_shell(git_bash_path_hint_for_bash(path))
         .ok()
         .map(|git_bash| git_bash.shell)
 }
@@ -339,10 +353,17 @@ pub fn ultimate_fallback_shell() -> DetectedShell {
     }
 }
 
-pub fn get_shell_by_model_provided_path(shell_path: &PathBuf) -> DetectedShell {
-    detect_shell_type(shell_path)
-        .and_then(|shell_type| get_shell(shell_type, Some(shell_path)))
-        .unwrap_or_else(ultimate_fallback_shell)
+pub fn get_shell_by_model_provided_path(
+    shell_path: &PathBuf,
+) -> Result<DetectedShell, ShellResolutionError> {
+    let shell_type = detect_shell_type(shell_path).ok_or_else(|| {
+        ShellResolutionError::new(format!(
+            "unsupported shell `{}`; expected zsh, bash, powershell, pwsh, sh, or cmd",
+            shell_path.display()
+        ))
+    })?;
+
+    resolve_model_provided_shell(shell_type, shell_path)
 }
 
 pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<DetectedShell> {
@@ -379,6 +400,53 @@ pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Detecte
 
         shell_with_fallback.unwrap_or_else(ultimate_fallback_shell)
     }
+}
+
+#[cfg(windows)]
+fn git_bash_path_hint_for_bash(path: Option<&PathBuf>) -> GitBashPathHint<'_> {
+    match path {
+        Some(path) if path.components().count() > 1 || path.is_absolute() => {
+            GitBashPathHint::Configured(path.as_path())
+        }
+        Some(_) | None => GitBashPathHint::SearchPath,
+    }
+}
+
+#[cfg(windows)]
+fn resolve_model_provided_shell(
+    shell_type: ShellType,
+    shell_path: &PathBuf,
+) -> Result<DetectedShell, ShellResolutionError> {
+    if shell_type == ShellType::Bash {
+        return find_git_bash_shell(git_bash_path_hint_for_bash(Some(shell_path)))
+            .map(|git_bash| git_bash.shell)
+            .map_err(|err| {
+                ShellResolutionError::new(format!(
+                    "could not resolve requested bash shell `{}`: {err}",
+                    shell_path.display()
+                ))
+            });
+    }
+
+    get_shell(shell_type, Some(shell_path)).ok_or_else(|| {
+        ShellResolutionError::new(format!(
+            "could not resolve requested shell `{}`",
+            shell_path.display()
+        ))
+    })
+}
+
+#[cfg(not(windows))]
+fn resolve_model_provided_shell(
+    shell_type: ShellType,
+    shell_path: &PathBuf,
+) -> Result<DetectedShell, ShellResolutionError> {
+    get_shell(shell_type, Some(shell_path)).ok_or_else(|| {
+        ShellResolutionError::new(format!(
+            "could not resolve requested shell `{}`",
+            shell_path.display()
+        ))
+    })
 }
 
 #[cfg(windows)]
@@ -508,7 +576,7 @@ fn git_for_windows_install_root_from_git_exe(git_path: &Path) -> Option<PathBuf>
 }
 
 #[cfg(windows)]
-fn git_for_windows_install_root_from_bash(shell_path: &Path) -> Option<PathBuf> {
+pub fn git_for_windows_install_root_from_bash(shell_path: &Path) -> Option<PathBuf> {
     if !path_file_stem_eq(shell_path, "bash") {
         return None;
     }
@@ -736,6 +804,29 @@ mod tests {
                 .contains("only Git for Windows bash.exe is supported")
         );
         assert_eq!(err.attempted_paths(), std::slice::from_ref(&bash_path));
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn model_provided_non_git_bash_returns_error() -> anyhow::Result<()> {
+        let fixture = TempFixture::new("git-bash-model-invalid")?;
+        let bash_path = fixture
+            .path()
+            .join("msys64")
+            .join("usr")
+            .join("bin")
+            .join("bash.exe");
+        touch(&bash_path)?;
+
+        let err = get_shell_by_model_provided_path(&bash_path)
+            .expect_err("non-Git-for-Windows bash should not fall back to cmd");
+
+        assert!(
+            err.to_string()
+                .contains("only Git for Windows bash.exe is supported")
+        );
 
         Ok(())
     }

@@ -82,8 +82,10 @@ fn ultimate_fallback_shell() -> Shell {
     codex_shell_command::shell_detect::ultimate_fallback_shell().into()
 }
 
-pub fn get_shell_by_model_provided_path(shell_path: &PathBuf) -> Shell {
-    codex_shell_command::shell_detect::get_shell_by_model_provided_path(shell_path).into()
+pub fn get_shell_by_model_provided_path(shell_path: &PathBuf) -> anyhow::Result<Shell> {
+    codex_shell_command::shell_detect::get_shell_by_model_provided_path(shell_path)
+        .map(Into::into)
+        .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<Shell> {
