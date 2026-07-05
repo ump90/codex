@@ -33,7 +33,7 @@ jobs:
   build:
     name: Build ${{ inputs.target }} from ${{ inputs.ref }}
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     defaults:
       run:
         working-directory: codex-rs
