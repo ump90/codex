@@ -1,11 +1,14 @@
 use std::borrow::Cow;
 
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
+use sqlx::SqlSafeStr;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqlitePoolOptions;
 
 use super::STATE_MIGRATOR;
+use super::line_ending_compatible_migrator;
 use super::repair_legacy_recency_migration_version;
 
 fn migrator_through(version: i64) -> Migrator {
@@ -24,6 +27,18 @@ fn migrator_through(version: i64) -> Migrator {
         create_schemas: STATE_MIGRATOR.create_schemas.clone(),
         no_tx: STATE_MIGRATOR.no_tx,
     }
+}
+
+fn crlf_migration(migration: &Migration) -> Migration {
+    let sql = migration.sql.as_str().replace("\r\n", "\n");
+    let sql = sql.replace('\n', "\r\n");
+    Migration::new(
+        migration.version,
+        migration.description.clone(),
+        migration.migration_type,
+        AssertSqlSafe(sql).into_sql_str(),
+        migration.no_tx,
+    )
 }
 
 #[tokio::test]
@@ -131,6 +146,40 @@ INSERT INTO threads (
 }
 
 #[tokio::test]
+async fn repairs_line_ending_only_migration_checksum_mismatch() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory database should open");
+    let first_migration = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 1)
+        .expect("first migration should exist");
+    let crlf_migrator = Migrator::with_migrations(vec![crlf_migration(first_migration)]);
+    crlf_migrator
+        .run(&pool)
+        .await
+        .expect("CRLF migration should apply");
+
+    let compatible_migrator = line_ending_compatible_migrator(&pool, &STATE_MIGRATOR)
+        .await
+        .expect("compatible migrator should be created");
+    compatible_migrator
+        .run(&pool)
+        .await
+        .expect("current migration should validate with CRLF-applied checksum");
+
+    let checksum = sqlx::query("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+        .fetch_one(&pool)
+        .await
+        .expect("applied migration should load")
+        .get::<Vec<u8>, _>("checksum");
+    assert_eq!(checksum, crlf_migration(first_migration).checksum.to_vec());
+}
+
+#[tokio::test]
 async fn repairs_recency_migration_that_was_applied_as_version_38() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -153,11 +202,13 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .filter(|migration| migration.version <= 37)
         .cloned()
         .collect::<Vec<_>>();
+    let legacy_recency_sql = recency_migration.sql.as_str().replace("\r\n", "\n");
+    let legacy_recency_sql = legacy_recency_sql.replace('\n', "\r\n");
     legacy_migrations.push(Migration::new(
         38,
         recency_migration.description.clone(),
         recency_migration.migration_type,
-        recency_migration.sql.clone(),
+        AssertSqlSafe(legacy_recency_sql).into_sql_str(),
         recency_migration.no_tx,
     ));
     let legacy_recency_migrator = Migrator::with_migrations(legacy_migrations);
@@ -169,7 +220,10 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
     repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
         .await
         .expect("legacy migration history should be repaired");
-    STATE_MIGRATOR
+    let compatible_migrator = line_ending_compatible_migrator(&pool, &STATE_MIGRATOR)
+        .await
+        .expect("compatible migrator should be created");
+    compatible_migrator
         .run(&pool)
         .await
         .expect("current migrations should apply after repair");
@@ -192,7 +246,14 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .migrations
         .iter()
         .filter(|migration| migration.version >= 38)
-        .map(|migration| (migration.version, migration.checksum.to_vec()))
+        .map(|migration| {
+            let checksum = if migration.version == 39 {
+                crlf_migration(migration).checksum.to_vec()
+            } else {
+                migration.checksum.to_vec()
+            };
+            (migration.version, checksum)
+        })
         .collect::<Vec<_>>();
     assert_eq!(applied, expected);
 }
