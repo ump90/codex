@@ -6,7 +6,8 @@ release flow:
 - `fork-windows-build.yml` builds Windows release artifacts manually from the
   selected ref.
 - `fork-release.yml` builds Windows release artifacts, creates or updates a
-  GitHub Release, and uploads the release archives.
+  GitHub Release, and uploads raw binary archives plus portable archives that
+  can be extracted and added to `PATH`.
 - `sync-upstream.yml` merges upstream `openai/codex` changes into the fork
   release branch.
 

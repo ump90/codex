@@ -189,11 +189,61 @@ jobs:
 
           Get-ChildItem -Path "dist" -Recurse | Select-Object FullName, Length
 
+      - name: Build portable Windows package
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $releaseDir = Join-Path -Path (Join-Path -Path "target" -ChildPath $target) -ChildPath "release"
+          $packageDir = Join-Path -Path "dist" -ChildPath "portable-$target"
+          $portableArchivePath = Join-Path -Path "dist" -ChildPath "codex-portable-windows-$target.zip"
+
+          python ..\scripts\build_codex_package.py `
+            --target $target `
+            --variant codex `
+            --cargo-profile release `
+            --package-dir $packageDir `
+            --force `
+            --entrypoint-bin (Join-Path -Path $releaseDir -ChildPath "codex.exe") `
+            --codex-command-runner-bin (Join-Path -Path $releaseDir -ChildPath "codex-command-runner.exe") `
+            --codex-windows-sandbox-setup-bin (Join-Path -Path $releaseDir -ChildPath "codex-windows-sandbox-setup.exe")
+
+          @'
+          @echo off
+          "%~dp0bin\codex.exe" %*
+          exit /b %ERRORLEVEL%
+          '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "codex.cmd") -Encoding ascii
+
+          @'
+          #!/usr/bin/env pwsh
+          & "$PSScriptRoot\bin\codex.exe" @args
+          exit $LASTEXITCODE
+          '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "codex.ps1") -Encoding utf8
+
+          @'
+          Portable Codex for Windows
+
+          Add this extracted directory to PATH, then run:
+
+            codex --version
+
+          You can also add the bin directory to PATH and run codex.exe directly.
+          '@ | Set-Content -LiteralPath (Join-Path -Path $packageDir -ChildPath "PORTABLE-INSTALL.txt") -Encoding utf8
+
+          if (Test-Path -LiteralPath $portableArchivePath) {
+            Remove-Item -LiteralPath $portableArchivePath -Force
+          }
+          Compress-Archive -Path (Join-Path -Path $packageDir -ChildPath "*") -DestinationPath $portableArchivePath -Force
+
+          Get-ChildItem -Path $packageDir -Recurse | Select-Object FullName, Length
+          Get-Item -LiteralPath $portableArchivePath | Select-Object FullName, Length
+
       - name: Upload Windows release archive
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: fork-release-windows-${{ matrix.target }}
-          path: codex-rs/dist/codex-windows-${{ matrix.target }}.zip
+          path: |
+            codex-rs/dist/codex-windows-${{ matrix.target }}.zip
+            codex-rs/dist/codex-portable-windows-${{ matrix.target }}.zip
           if-no-files-found: error
 
   publish:
@@ -223,7 +273,7 @@ jobs:
         run: |
           set -euo pipefail
           cd release-artifacts
-          sha256sum codex-windows-*.zip > SHA256SUMS.txt
+          sha256sum *.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Ensure release tag points at selected ref
@@ -302,7 +352,7 @@ jobs:
             gh release create "${create_args[@]}"
           fi
 
-          mapfile -t assets < <(find release-artifacts -maxdepth 1 -type f \( -name 'codex-windows-*.zip' -o -name 'SHA256SUMS.txt' \) | sort)
+          mapfile -t assets < <(find release-artifacts -maxdepth 1 -type f \( -name 'codex-*.zip' -o -name 'SHA256SUMS.txt' \) | sort)
           if [[ "${#assets[@]}" -eq 0 ]]; then
             echo "No release assets found." >&2
             exit 1
