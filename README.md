@@ -1,71 +1,111 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex CLI Windows Git Bash
 
----
+这是一个让 Codex CLI 在 Windows 上默认使用 Git Bash 的版本。便携包已经带上 Git for Windows，正常情况下解压后把包含 `codex.cmd` 的目录加入 `PATH` 就能用。
 
-## Quickstart
+## 安装
 
-### Installing and running Codex CLI
+1. 下载：
 
-Run the following on Mac or Linux to install Codex CLI:
+   ```text
+   codex-portable-windows-x86_64-pc-windows-msvc.zip
+   ```
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+2. 解压到固定目录，例如：
+
+   ```text
+   C:\Tools\codex
+   ```
+
+3. 把包含 `codex.cmd` 的解压根目录加入 `PATH`。
+
+4. 打开一个新的终端，运行：
+
+   ```powershell
+   codex --version
+   codex
+   ```
+
+便携包根目录里的 `codex.cmd` 会自动使用内置的 Git Bash。不要把 `bin` 目录加入 `PATH`。
+
+## 使用前建议备份
+
+Codex 的用户配置和会话数据通常在：
+
+```text
+%USERPROFILE%\.codex
 ```
 
-Run the following on Windows to install Codex CLI:
+如果你之前用过上游版本或其他分支，建议先备份这个目录，再启动本版本。
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+PowerShell:
+
+```powershell
+Copy-Item "$env:USERPROFILE\.codex" "$env:USERPROFILE\.codex.backup" -Recurse
 ```
 
-Codex CLI can also be installed via the following package managers:
+## 可选配置
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+配置文件：
+
+```text
+%USERPROFILE%\.codex\config.toml
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+默认会使用 Git Bash。如果你想明确写出来：
+
+```toml
+[windows]
+default_shell = "git-bash"
 ```
 
-Then simply run `codex` to get started.
+如果你不想用便携包里的 Git Bash，而是想用自己安装的 Git for Windows：
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+```toml
+[windows]
+default_shell = "git-bash"
+git_bash_path = "C:\\Program Files\\Git\\bin\\bash.exe"
+```
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+也可以切回 PowerShell 或 cmd：
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+```toml
+[windows]
+default_shell = "powershell"
+# default_shell = "cmd"
+```
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+## 常见问题
 
-</details>
+### 中文乱码
 
-### Using Codex with your ChatGPT plan
+这个版本会尽量让 Git Bash 相关命令使用 UTF-8，避免中文 Windows 下常见的 GBK 乱码。
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+如果仍然乱码，先确认：
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+- 运行的是解压根目录里的 `codex.cmd`。
+- `PATH` 里加入的是包含 `codex.cmd` 的解压根目录。
+- 乱码是否来自原生 Windows 程序，例如 `cmd.exe`、MSVC 工具链或某些 Python 程序；这类程序可能不读取 Git Bash 的 `LANG/LC_*` 设置，仍按系统代码页输出。
 
-## Docs
+最后手段：在 Windows“语言和区域”设置中开启“使用 Unicode UTF-8 提供全球语言支持”。这是系统级设置，可能影响其他旧程序。
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+### 找不到 Git Bash
 
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+优先检查 `PATH` 里加入的是包含 `codex.cmd` 的解压根目录，例如：
+
+```text
+C:\Tools\codex
+```
+
+不要加入这个目录：
+
+```text
+C:\Tools\codex\bin
+```
+
+如果绕过 `codex.cmd` 直接运行 `bin\codex.exe`，Codex 可能找不到便携包内置的 Git Bash。
+
+## 相关链接
+
+- [OpenAI Codex](https://github.com/openai/codex)
+- [Codex Documentation](https://developers.openai.com/codex)
+- [License](./LICENSE)

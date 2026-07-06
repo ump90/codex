@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -117,6 +119,12 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
     );
     let active_permission_profile = turn_context.config.permissions.active_permission_profile();
     inject_permission_profile_env(&mut expected_env, active_permission_profile.as_ref());
+    if cfg!(windows) {
+        for key in ["LANG", "LC_CTYPE", "LC_ALL"] {
+            expected_env.retain(|existing_key, _| !existing_key.eq_ignore_ascii_case(key));
+            expected_env.insert(key.to_string(), "C.UTF-8".to_string());
+        }
+    }
 
     let params = ShellCommandToolCallParams {
         command,
@@ -158,6 +166,64 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
     assert_eq!(exec_params.sandbox_permissions, sandbox_permissions);
     assert_eq!(exec_params.justification, justification);
     assert_eq!(exec_params.arg0, None);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn shell_command_handler_for_windows_bash_forces_utf8_locale() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    let config = Arc::make_mut(&mut turn_context.config);
+    config.permissions.shell_environment_policy.r#set = HashMap::from([
+        ("lang".to_string(), "zh_CN.GBK".to_string()),
+        ("Lc_CtYpE".to_string(), "C".to_string()),
+        ("LC_ALL".to_string(), "C".to_string()),
+    ]);
+    let selected_cwd = config.cwd.clone();
+    let selected_shell = Shell {
+        shell_type: ShellType::Bash,
+        shell_path: PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+    };
+    let selected_environment = TurnEnvironment::new(
+        "selected-environment".to_string(),
+        Arc::clone(
+            &turn_context
+                .environments
+                .primary()
+                .expect("primary environment")
+                .environment,
+        ),
+        PathUri::from_abs_path(&selected_cwd),
+        Some(selected_shell),
+    );
+    let params = ShellCommandToolCallParams {
+        command: "echo hello".to_string(),
+        workdir: None,
+        login: None,
+        timeout_ms: None,
+        sandbox_permissions: None,
+        additional_permissions: None,
+        prefix_rule: None,
+        justification: None,
+    };
+
+    let exec_params = ShellCommandHandler::to_exec_params(
+        &params,
+        &session,
+        &turn_context,
+        &selected_environment,
+        selected_cwd,
+        /*allow_login_shell*/ false,
+    )
+    .expect("non-login shells should still be allowed");
+
+    assert_eq!(exec_params.env.get("LANG"), Some(&"C.UTF-8".to_string()));
+    assert_eq!(
+        exec_params.env.get("LC_CTYPE"),
+        Some(&"C.UTF-8".to_string())
+    );
+    assert_eq!(exec_params.env.get("LC_ALL"), Some(&"C.UTF-8".to_string()));
+    assert!(!exec_params.env.contains_key("lang"));
+    assert!(!exec_params.env.contains_key("Lc_CtYpE"));
 }
 
 #[test]

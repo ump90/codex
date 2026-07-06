@@ -12,6 +12,7 @@ use crate::maybe_emit_implicit_skill_invocation;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::shell::Shell;
+use crate::shell::ShellType;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
@@ -107,6 +108,12 @@ impl ShellCommandHandler {
         );
         let active_permission_profile = turn_context.config.permissions.active_permission_profile();
         inject_permission_profile_env(&mut env, active_permission_profile.as_ref());
+        if cfg!(windows) && shell.shell_type == ShellType::Bash {
+            for key in ["LANG", "LC_CTYPE", "LC_ALL"] {
+                env.retain(|existing_key, _| !existing_key.eq_ignore_ascii_case(key));
+                env.insert(key.to_string(), "C.UTF-8".to_string());
+            }
+        }
 
         Ok(ExecParams {
             command,
