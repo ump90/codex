@@ -10,8 +10,7 @@ release flow:
   can be extracted and added to `PATH`. The portable archives include Portable
   Git for Windows/Git Bash so the fork can use Git Bash without requiring a
   separate Git installation.
-- `sync-upstream.yml` merges upstream `openai/codex` changes into the fork
-  release branch.
+- `sync-upstream.yml` merges upstream `openai/codex` changes into `main`.
 
 The upstream OpenAI CI, triage, signing, package publishing, and release
 automation workflows are intentionally not carried on this branch.

@@ -14,13 +14,13 @@ on:
       target_branch:
         description: "Branch to update in this repository."
         required: true
-        default: "codex/fork-release"
+        default: "main"
   schedule:
     # Daily at 04:00 Asia/Shanghai.
     - cron: "0 20 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.target_branch || 'codex/fork-release' }}
+  group: ${{ github.workflow }}-${{ inputs.target_branch || 'main' }}
   cancel-in-progress: false
 
 permissions:
@@ -28,12 +28,12 @@ permissions:
 
 jobs:
   sync:
-    name: Merge upstream into ${{ inputs.target_branch || 'codex/fork-release' }}
+    name: Merge upstream into ${{ inputs.target_branch || 'main' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.target_branch || 'codex/fork-release' }}
+          ref: ${{ inputs.target_branch || 'main' }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
@@ -47,7 +47,7 @@ jobs:
         env:
           UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository || 'openai/codex' }}
           UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'main' }}
-          TARGET_BRANCH: ${{ inputs.target_branch || 'codex/fork-release' }}
+          TARGET_BRANCH: ${{ inputs.target_branch || 'main' }}
         run: |
           set -euo pipefail
 
