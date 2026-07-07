@@ -36,7 +36,7 @@ on:
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   GIT_FOR_WINDOWS_RELEASE_TAG: "v2.55.0.windows.2"
-  WINDOWS_BINARIES: "codex codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
+  WINDOWS_BINARIES: "codex codex-code-mode-host codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.release_tag }}
@@ -266,6 +266,7 @@ jobs:
             --package-dir $packageDir `
             --force `
             --entrypoint-bin (Join-Path -Path $releaseDir -ChildPath "codex.exe") `
+            --code-mode-host-bin (Join-Path -Path $releaseDir -ChildPath "codex-code-mode-host.exe") `
             --codex-command-runner-bin (Join-Path -Path $releaseDir -ChildPath "codex-command-runner.exe") `
             --codex-windows-sandbox-setup-bin (Join-Path -Path $releaseDir -ChildPath "codex-windows-sandbox-setup.exe")
 

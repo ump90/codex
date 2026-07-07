@@ -20,7 +20,7 @@ on:
 # nested submodules. Prefer the system git CLI across every Cargo invocation.
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  WINDOWS_BINARIES: "codex codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
+  WINDOWS_BINARIES: "codex codex-code-mode-host codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.ref }}-${{ inputs.target }}
