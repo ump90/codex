@@ -87,7 +87,6 @@ mod override_updates;
 mod pending_input;
 mod permissions_messages;
 mod personality;
-mod personality_migration;
 mod plugins;
 mod prompt_caching;
 mod prompt_debug_tests;
@@ -144,3 +143,4 @@ mod window_headers;
 mod windows_git_bash;
 #[cfg(target_os = "windows")]
 mod windows_sandbox;
+mod workspace_roots;
