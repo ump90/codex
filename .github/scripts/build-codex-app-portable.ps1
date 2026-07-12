@@ -129,6 +129,18 @@ Remove-Item -LiteralPath $msixPath -Force
 Remove-Item -LiteralPath $extractDir -Recurse -Force
 
 $resourcesDir = Join-Path -Path $appDir -ChildPath "resources"
+$wslRipgrepPath = Join-Path -Path $resourcesDir -ChildPath "rg"
+if (-not (Test-Path -LiteralPath $wslRipgrepPath -PathType Leaf)) {
+    throw "Codex App is missing the expected WSL ripgrep binary: $wslRipgrepPath"
+}
+
+$windowsRipgrepSource = Join-Path -Path $CodexPackageDir -ChildPath "codex-path\rg.exe"
+$windowsRipgrepPath = Join-Path -Path $resourcesDir -ChildPath "rg.exe"
+if (-not (Test-Path -LiteralPath $windowsRipgrepSource -PathType Leaf)) {
+    throw "Portable Codex package is missing the Windows ripgrep binary: $windowsRipgrepSource"
+}
+Copy-Item -LiteralPath $windowsRipgrepSource -Destination $windowsRipgrepPath -Force
+
 $sidecarSources = [ordered]@{
     "codex.exe" = "bin\codex.exe"
     "codex-code-mode-host.exe" = "bin\codex-code-mode-host.exe"
@@ -155,6 +167,28 @@ foreach ($relativePath in @("cmd\git.exe", "bin\bash.exe", "usr\bin\msys-2.0.dll
     }
 }
 Copy-Item -LiteralPath $portableGitSource -Destination $portableGitDestination -Recurse -Force
+
+$gitBashLocalBin = Join-Path -Path $portableGitDestination -ChildPath "usr\local\bin"
+New-Item -ItemType Directory -Path $gitBashLocalBin -Force | Out-Null
+Copy-Item -LiteralPath $windowsRipgrepSource `
+    -Destination (Join-Path -Path $gitBashLocalBin -ChildPath "rg.exe") `
+    -Force
+
+# Keep the extensionless Linux binary in resources for WSL. Git Bash puts
+# /usr/local/bin ahead of inherited Windows PATH entries, so its rg command
+# resolves to the native executable without changing WSL's fixed resource.
+if ($Target -eq "x86_64-pc-windows-msvc") {
+    $gitBashPath = Join-Path -Path $portableGitDestination -ChildPath "bin\bash.exe"
+    $resolvedRipgrep = (& $gitBashPath -lc "command -v rg" | Out-String).Trim().Replace("\", "/")
+    if ($LASTEXITCODE -ne 0 -or -not $resolvedRipgrep.EndsWith("/usr/local/bin/rg.exe", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Git Bash resolved rg to '$resolvedRipgrep' instead of /usr/local/bin/rg.exe"
+    }
+
+    & $gitBashPath -lc "rg --version"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows ripgrep failed under Git Bash"
+    }
+}
 
 @'
 @echo off
