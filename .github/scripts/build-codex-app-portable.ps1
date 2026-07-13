@@ -179,12 +179,18 @@ Copy-Item -LiteralPath $windowsRipgrepSource `
 # resolves to the native executable without changing WSL's fixed resource.
 if ($Target -eq "x86_64-pc-windows-msvc") {
     $gitBashPath = Join-Path -Path $portableGitDestination -ChildPath "bin\bash.exe"
-    $resolvedRipgrep = (& $gitBashPath -lc "command -v rg" | Out-String).Trim().Replace("\", "/")
-    if ($LASTEXITCODE -ne 0 -or -not $resolvedRipgrep.EndsWith("/usr/local/bin/rg.exe", [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Git Bash resolved rg to '$resolvedRipgrep' instead of /usr/local/bin/rg.exe"
-    }
-
-    & $gitBashPath -lc "rg --version"
+    $verifyRipgrep = @'
+resolved_rg="$(command -v rg)" || exit 1
+case "$resolved_rg" in
+    /usr/local/bin/rg|/usr/local/bin/rg.exe) ;;
+    *)
+        printf "Git Bash resolved rg to '%s' instead of /usr/local/bin/rg\n" "$resolved_rg" >&2
+        exit 1
+        ;;
+esac
+exec rg --version
+'@
+    & $gitBashPath -lc $verifyRipgrep
     if ($LASTEXITCODE -ne 0) {
         throw "Windows ripgrep failed under Git Bash"
     }
