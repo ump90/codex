@@ -19,6 +19,10 @@ release flow:
   upstream release manifest does not offer an ARM64 package. App packaging runs
   in separate jobs that consume the CLI portable archives, keeping the large
   Rust build directory and extracted MSIX off the same runner disk.
+- `fork-codex-app-release.yml` refreshes only the portable Codex App assets in
+  an existing fork release. It reuses the release's portable CLI archives,
+  downloads the latest official Codex App packages, rebuilds the App archives,
+  and replaces their entries in `SHA256SUMS.txt`. It does not compile the CLI.
 - `sync-upstream.yml` merges upstream `openai/codex` changes into `main`.
 
 The upstream OpenAI CI, triage, signing, package publishing, and release

@@ -42,7 +42,7 @@ env:
   WINDOWS_BINARIES: "codex codex-code-mode-host codex-responses-api-proxy codex-windows-sandbox-setup codex-command-runner codex-app-server"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.release_tag }}
+  group: fork-release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 permissions:

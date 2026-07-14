@@ -1,0 +1,291 @@
+name: fork-codex-app-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing GitHub Release tag whose portable CLI archives will be reused and whose Codex App assets will be updated."
+        required: true
+        type: string
+      ref:
+        description: "Branch, tag, or SHA containing the App packaging workflow and scripts."
+        required: true
+        default: "codex/fork-release"
+        type: string
+
+env:
+  CODEX_APP_MANIFEST_URL: "https://codexapp.agentsmirror.com/latest/manifest"
+  CODEX_APP_WINDOWS_ARM64_URL: "https://codexapp.agentsmirror.com/latest/win-arm64"
+  CODEX_APP_WINDOWS_X64_URL: "https://codexapp.agentsmirror.com/latest/win-x64"
+
+concurrency:
+  group: fork-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Resolve App and CLI metadata
+    runs-on: ubuntu-latest
+    outputs:
+      ref_sha: ${{ steps.release_metadata.outputs.ref_sha }}
+      release_tag: ${{ steps.release_metadata.outputs.release_tag }}
+      cli_source_sha: ${{ steps.release_metadata.outputs.cli_source_sha }}
+      codex_app_x64_version: ${{ steps.codex_app_metadata.outputs.x64_app_version }}
+      codex_app_x64_package_version: ${{ steps.codex_app_metadata.outputs.x64_package_version }}
+      codex_app_x64_sha256_base64: ${{ steps.codex_app_metadata.outputs.x64_sha256_base64 }}
+      codex_app_arm64_version: ${{ steps.codex_app_metadata.outputs.arm64_app_version }}
+      codex_app_arm64_package_version: ${{ steps.codex_app_metadata.outputs.arm64_package_version }}
+      codex_app_arm64_sha256_base64: ${{ steps.codex_app_metadata.outputs.arm64_sha256_base64 }}
+      codex_app_matrix: ${{ steps.codex_app_metadata.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate existing CLI release
+        id: release_metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RELEASE_TAG}" ]]; then
+            echo "release_tag is required." >&2
+            exit 1
+          fi
+          git check-ref-format "refs/tags/${RELEASE_TAG}"
+
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          if ! git rev-parse -q --verify "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null; then
+            echo "Release tag ${RELEASE_TAG} was not found in the checked-out repository." >&2
+            exit 1
+          fi
+
+          ref_sha="$(git rev-parse HEAD)"
+          cli_source_sha="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          {
+            echo "ref_sha=${ref_sha}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "cli_source_sha=${cli_source_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve latest Codex App metadata
+        id: codex_app_metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          manifest_path="${RUNNER_TEMP}/codex-app-release-manifest.json"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "${manifest_path}" \
+            "${CODEX_APP_MANIFEST_URL}"
+
+          x64_downloadable="$(jq -r '.sources.windows.architectures.x64.downloadable // false' "${manifest_path}")"
+          x64_app_version="$(jq -r '.sources.windows.architectures.x64.appVersion // empty' "${manifest_path}")"
+          x64_package_version="$(jq -r '.sources.windows.architectures.x64.version // empty' "${manifest_path}")"
+          x64_sha256_base64="$(jq -r '.sources.windows.architectures.x64.catalog.hash // empty' "${manifest_path}")"
+          arm64_downloadable="$(jq -r '.sources.windows.architectures.arm64.downloadable // false' "${manifest_path}")"
+          arm64_app_version="$(jq -r '.sources.windows.architectures.arm64.appVersion // empty' "${manifest_path}")"
+          arm64_package_version="$(jq -r '.sources.windows.architectures.arm64.version // empty' "${manifest_path}")"
+          arm64_sha256_base64="$(jq -r '.sources.windows.architectures.arm64.catalog.hash // empty' "${manifest_path}")"
+
+          if [[ "${x64_downloadable}" != "true" || -z "${x64_app_version}" || -z "${x64_package_version}" || -z "${x64_sha256_base64}" ]]; then
+            echo "The latest Codex App manifest does not contain complete Windows x64 package metadata." >&2
+            exit 1
+          fi
+          if [[ "${arm64_downloadable}" == "true" && ( -z "${arm64_app_version}" || -z "${arm64_package_version}" || -z "${arm64_sha256_base64}" ) ]]; then
+            echo "The latest Codex App manifest marks Windows ARM64 downloadable but does not provide complete package metadata." >&2
+            exit 1
+          fi
+
+          release_assets="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          x64_cli_archive="codex-portable-windows-x86_64-pc-windows-msvc.zip"
+          if ! grep -Fxq "${x64_cli_archive}" <<< "${release_assets}"; then
+            echo "Release ${RELEASE_TAG} is missing ${x64_cli_archive}." >&2
+            exit 1
+          fi
+
+          matrix='{"include":[{"target":"x86_64-pc-windows-msvc"}]}'
+          if [[ "${arm64_downloadable}" == "true" ]]; then
+            arm64_cli_archive="codex-portable-windows-aarch64-pc-windows-msvc.zip"
+            if ! grep -Fxq "${arm64_cli_archive}" <<< "${release_assets}"; then
+              echo "Release ${RELEASE_TAG} is missing ${arm64_cli_archive}." >&2
+              exit 1
+            fi
+            matrix='{"include":[{"target":"x86_64-pc-windows-msvc"},{"target":"aarch64-pc-windows-msvc"}]}'
+          fi
+
+          {
+            echo "x64_app_version=${x64_app_version}"
+            echo "x64_package_version=${x64_package_version}"
+            echo "x64_sha256_base64=${x64_sha256_base64}"
+            echo "arm64_app_version=${arm64_app_version}"
+            echo "arm64_package_version=${arm64_package_version}"
+            echo "arm64_sha256_base64=${arm64_sha256_base64}"
+            echo "matrix=${matrix}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-codex-app:
+    name: Build portable Codex App ${{ matrix.target }}
+    needs: metadata
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.metadata.outputs.codex_app_matrix) }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.metadata.outputs.ref_sha }}
+          persist-credentials: false
+
+      - name: Download portable CLI package from release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $target = "${{ matrix.target }}"
+          $releaseTag = "${{ needs.metadata.outputs.release_tag }}"
+          $artifactDir = Join-Path -Path $env:RUNNER_TEMP -ChildPath "codex-app-input-$target"
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+
+          gh release download $releaseTag `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern "codex-portable-windows-$target.zip" `
+            --dir $artifactDir `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to download the portable CLI package for $target from release $releaseTag"
+          }
+
+      - name: Extract portable CLI package
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $artifactDir = Join-Path -Path $env:RUNNER_TEMP -ChildPath "codex-app-input-$target"
+          $cliArchive = Join-Path -Path $artifactDir -ChildPath "codex-portable-windows-$target.zip"
+          $cliPortablePackageDir = Join-Path -Path $env:RUNNER_TEMP -ChildPath "codex-cli-portable-$target"
+
+          if (-not (Test-Path -LiteralPath $cliArchive -PathType Leaf)) {
+            throw "Downloaded release is missing $cliArchive"
+          }
+          New-Item -ItemType Directory -Path $cliPortablePackageDir -Force | Out-Null
+          & 7z x $cliArchive "-o$cliPortablePackageDir" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to extract $cliArchive"
+          }
+
+      - name: Build portable Codex App package
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $cliPortablePackageDir = Join-Path -Path $env:RUNNER_TEMP -ChildPath "codex-cli-portable-$target"
+
+          if ($target -eq "x86_64-pc-windows-msvc") {
+            $sourceUrl = $env:CODEX_APP_WINDOWS_X64_URL
+            $expectedSha256Base64 = "${{ needs.metadata.outputs.codex_app_x64_sha256_base64 }}"
+            $baseAppVersion = "${{ needs.metadata.outputs.codex_app_x64_version }}"
+            $basePackageVersion = "${{ needs.metadata.outputs.codex_app_x64_package_version }}"
+          } elseif ($target -eq "aarch64-pc-windows-msvc") {
+            $sourceUrl = $env:CODEX_APP_WINDOWS_ARM64_URL
+            $expectedSha256Base64 = "${{ needs.metadata.outputs.codex_app_arm64_sha256_base64 }}"
+            $baseAppVersion = "${{ needs.metadata.outputs.codex_app_arm64_version }}"
+            $basePackageVersion = "${{ needs.metadata.outputs.codex_app_arm64_package_version }}"
+          } else {
+            throw "Unsupported Codex App target: $target"
+          }
+
+          & ..\.github\scripts\build-codex-app-portable.ps1 `
+            -Target $target `
+            -CodexPackageDir $cliPortablePackageDir `
+            -DistRoot (Join-Path -Path (Get-Location) -ChildPath "dist") `
+            -SourceUrl $sourceUrl `
+            -ExpectedSha256Base64 $expectedSha256Base64 `
+            -BaseAppVersion $baseAppVersion `
+            -BasePackageVersion $basePackageVersion `
+            -ForkReleaseTag "${{ needs.metadata.outputs.release_tag }}" `
+            -SourceRef "${{ needs.metadata.outputs.cli_source_sha }}"
+
+      - name: Upload portable Codex App archive
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: fork-codex-app-release-${{ matrix.target }}
+          path: codex-rs/dist/codex-app-portable-windows-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  publish:
+    name: Update Codex App release assets
+    needs:
+      - metadata
+      - build-codex-app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download portable Codex App archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fork-codex-app-release-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Update checksum manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          metadata_dir="${RUNNER_TEMP}/release-metadata"
+          mkdir -p "${metadata_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern SHA256SUMS.txt \
+            --dir "${metadata_dir}" \
+            --clobber
+          cp "${metadata_dir}/SHA256SUMS.txt" release-artifacts/SHA256SUMS.txt
+
+          mapfile -t app_assets < <(find release-artifacts -maxdepth 1 -type f -name 'codex-app-portable-windows-*.zip' | sort)
+          if [[ "${#app_assets[@]}" -eq 0 ]]; then
+            echo "No Codex App release assets found." >&2
+            exit 1
+          fi
+
+          for asset_path in "${app_assets[@]}"; do
+            asset_name="$(basename "${asset_path}")"
+            awk -v asset_name="${asset_name}" '{ recorded_name = $2; sub(/^\*/, "", recorded_name); if (recorded_name != asset_name) print }' \
+              release-artifacts/SHA256SUMS.txt > release-artifacts/SHA256SUMS.txt.tmp
+            mv release-artifacts/SHA256SUMS.txt.tmp release-artifacts/SHA256SUMS.txt
+            (cd release-artifacts && sha256sum "${asset_name}") >> release-artifacts/SHA256SUMS.txt
+          done
+
+          LC_ALL=C sort -k2,2 -o release-artifacts/SHA256SUMS.txt release-artifacts/SHA256SUMS.txt
+          cat release-artifacts/SHA256SUMS.txt
+
+          gh release upload "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            "${app_assets[@]}" \
+            release-artifacts/SHA256SUMS.txt \
+            --clobber
+
+          {
+            echo "### Codex App assets updated"
+            echo
+            echo "- Release: \`${RELEASE_TAG}\`"
+            echo "- App version: \`${{ needs.metadata.outputs.codex_app_x64_version }}\`"
+            printf -- '- Asset: `%s`\n' "${app_assets[@]##*/}"
+          } >> "$GITHUB_STEP_SUMMARY"
