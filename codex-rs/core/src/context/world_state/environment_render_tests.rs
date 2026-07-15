@@ -95,7 +95,7 @@ fn serialize_workspace_write_environment_context() {
 
 #[test]
 fn serialize_environment_context_with_foreign_windows_cwd() {
-    let context = environment_state(
+    let mut context = environment_state(
         [environment(
             "remote",
             PathUri::parse("file:///C:/windows").expect("Windows cwd URI"),
@@ -106,19 +106,25 @@ fn serialize_environment_context_with_foreign_windows_cwd() {
         /*network*/ None,
         /*subagents*/ None,
     );
+    context.filesystem = Some(FileSystemContext::from_permission_profile(
+        &PermissionProfile::Disabled,
+        &[PathUri::parse("file:///D:/workspace").expect("Windows workspace root URI")],
+        PathDisplayStyle::Native,
+    ));
 
     assert_eq!(
         context.render(),
         r#"<environment_context>
   <cwd>C:\windows</cwd>
   <shell>powershell</shell>
+  <filesystem><workspace_roots><root>D:\workspace</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
 </environment_context>"#
     );
 }
 
 #[test]
 fn serialize_environment_context_with_git_bash_windows_cwd() {
-    let context = environment_state(
+    let mut context = environment_state(
         [environment(
             "local",
             PathUri::parse("file:///C:/Users/ump90/Desktop").expect("Windows cwd URI"),
@@ -129,12 +135,18 @@ fn serialize_environment_context_with_git_bash_windows_cwd() {
         /*network*/ None,
         /*subagents*/ None,
     );
+    context.filesystem = Some(FileSystemContext::from_permission_profile(
+        &PermissionProfile::Disabled,
+        &[PathUri::parse("file:///D:/workspace").expect("Windows workspace root URI")],
+        PathDisplayStyle::GitBash,
+    ));
 
     assert_eq!(
         context.render(),
         r#"<environment_context>
   <cwd>/c/Users/ump90/Desktop</cwd>
   <shell>bash</shell>
+  <filesystem><workspace_roots><root>/d/workspace</root></workspace_roots><permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile></filesystem>
 </environment_context>"#
     );
 }
@@ -142,6 +154,7 @@ fn serialize_environment_context_with_git_bash_windows_cwd() {
 #[test]
 fn serialize_environment_context_with_network() {
     let network = NetworkContext::new(
+        /*enabled*/ true,
         vec!["api.example.com".to_string(), "*.openai.com".to_string()],
         vec!["blocked.example.com".to_string()],
     );
@@ -182,7 +195,7 @@ fn workspace_write_permission_profile_with_private_denials() -> PermissionProfil
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
-                    value: FileSystemSpecialPath::project_roots(Some(PathBuf::from("private"))),
+                    value: FileSystemSpecialPath::project_roots(Some("private".to_string())),
                 },
                 access: FileSystemAccessMode::Deny,
             },
@@ -220,7 +233,10 @@ fn serialize_environment_context_with_full_filesystem_profile() {
     );
     context.filesystem = Some(FileSystemContext::from_permission_profile(
         &workspace_write_permission_profile_with_private_denials(),
-        &[repo.clone(), other_repo.clone()],
+        &[
+            PathUri::from_abs_path(&repo),
+            PathUri::from_abs_path(&other_repo),
+        ],
         PathDisplayStyle::Native,
     ));
 
@@ -326,6 +342,44 @@ fn serialize_environment_context_with_multiple_selected_environments() {
     );
 
     assert_eq!(context.render(), expected);
+}
+
+#[test]
+fn serialize_environment_context_with_git_bash_and_remote_posix_paths() {
+    let context = environment_state(
+        [
+            environment(
+                "local",
+                PathUri::parse("file:///C:/Users/Alice/project").expect("Windows cwd URI"),
+                "bash",
+            ),
+            environment(
+                "remote",
+                PathUri::parse("file:///srv/project").expect("POSIX cwd URI"),
+                "bash",
+            ),
+        ],
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    );
+
+    assert_eq!(
+        context.render(),
+        r#"<environment_context>
+  <environments>
+    <environment id="local">
+      <cwd>/c/Users/Alice/project</cwd>
+      <shell>bash</shell>
+    </environment>
+    <environment id="remote">
+      <cwd>/srv/project</cwd>
+      <shell>bash</shell>
+    </environment>
+  </environments>
+</environment_context>"#
+    );
 }
 
 #[test]

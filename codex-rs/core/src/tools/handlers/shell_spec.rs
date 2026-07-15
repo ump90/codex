@@ -23,6 +23,11 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     include_environment_id: bool,
     include_shell_parameter: bool,
 ) -> ToolSpec {
+    let yield_time_ms_description = if cfg!(windows) {
+        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 2000-30000 ms. Set a shorter value only when intentionally starting a long-lived or interactive process and you want a session ID promptly."
+    } else {
+        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+    };
     let mut properties = BTreeMap::from([
         (
             "cmd".to_string(),
@@ -44,9 +49,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         ),
         (
             "yield_time_ms".to_string(),
-            JsonSchema::number(Some(
-                "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.".to_string(),
-            )),
+            JsonSchema::number(Some(yield_time_ms_description.to_string())),
         ),
         (
             "max_output_tokens".to_string(),
@@ -87,15 +90,10 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
 
     ToolSpec::Function(ResponsesApiTool {
         name: "exec_command".to_string(),
-        description: if cfg!(windows) {
-            format!(
-                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
-                windows_shell_guidance()
-            )
-        } else {
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-                .to_string()
-        },
+        description: format!(
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
+            windows_shell_guidance()
+        ),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
@@ -185,9 +183,8 @@ pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
         options.exec_permission_approvals_enabled,
     ));
 
-    let description = if cfg!(windows) {
-        format!(
-            r#"Runs a command in the user's default Windows shell and returns its output.
+    let description = format!(
+        r#"Runs a command in the user's default shell and returns its output.
 
 Use the shell shown in <environment_context><shell>:
 
@@ -198,13 +195,8 @@ Use the shell shown in <environment_context><shell>:
 Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.
 
 {}"#,
-            windows_shell_guidance()
-        )
-    } else {
-        r#"Runs a shell command and returns its output.
-- Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary."#
-            .to_string()
-    };
+        windows_shell_guidance()
+    );
 
     ToolSpec::Function(ResponsesApiTool {
         name: "shell_command".to_string(),
@@ -400,7 +392,7 @@ fn file_system_permissions_schema() -> JsonSchema {
 
 fn windows_shell_guidance() -> &'static str {
     r#"Windows safety rules:
-- When <environment_context><shell> is `bash`, commands run in Git Bash. Use Git Bash paths such as `/c/Users/name/project` or forward-slash Windows paths such as `C:/Users/name/project`; do not put raw backslash paths like `C:\Users\name` directly in Bash commands.
+- When <environment_context><shell> is `bash` and its cwd uses a Windows drive path such as `/c/Users/name/project`, commands run in Git Bash. Use that path form or forward-slash Windows paths such as `C:/Users/name/project`; do not put raw backslash paths like `C:\Users\name` directly in Bash commands.
 - Do not compose destructive filesystem commands across shells. Do not enumerate paths in one shell and then pass them to PowerShell, `cmd /c`, batch builtins, Git Bash, or another shell for deletion or moving. Use one shell end-to-end, prefer that shell's literal-path facilities, and avoid string-built shell commands for file operations.
 - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.
 - When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control."#

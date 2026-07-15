@@ -604,6 +604,56 @@ fn build_network_proxy_spec(
     })
 }
 
+pub fn validate_windows_sandbox_network_proxy_compatibility(
+    windows_sandbox_level: WindowsSandboxLevel,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    validate_windows_sandbox_network_proxy_compatibility_for_platform(
+        cfg!(target_os = "windows"),
+        windows_sandbox_level,
+        network_proxy_configured,
+    )
+}
+
+fn validate_windows_sandbox_network_proxy_compatibility_for_platform(
+    is_windows: bool,
+    windows_sandbox_level: WindowsSandboxLevel,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    if is_windows
+        && network_proxy_configured
+        && windows_sandbox_level != WindowsSandboxLevel::Elevated
+    {
+        return Err(ConstraintError::NetworkProxyIncompatibleWithUnelevatedWindowsSandbox.into());
+    }
+    Ok(())
+}
+
+fn validate_windows_network_proxy_requirements(
+    requirements: &ConfigRequirementsToml,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    validate_windows_network_proxy_requirements_for_platform(
+        cfg!(target_os = "windows"),
+        requirements,
+        network_proxy_configured,
+    )
+}
+
+fn validate_windows_network_proxy_requirements_for_platform(
+    is_windows: bool,
+    requirements: &ConfigRequirementsToml,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    if is_windows
+        && network_proxy_configured
+        && !requirements.allows_only_elevated_windows_sandbox()
+    {
+        return Err(ConstraintError::NetworkProxyRequiresElevatedWindowsSandboxRequirement.into());
+    }
+    Ok(())
+}
+
 /// Configured thread persistence backend.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ThreadStoreConfig {
@@ -1105,12 +1155,25 @@ pub(crate) const DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE: &str = concat!(
 );
 const TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE_MAX_BYTES: usize = 2000;
 const TOKEN_BUDGET_GUIDANCE_MESSAGE_MAX_BYTES: usize = 2000;
+const AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenBudgetConfig {
     pub reminder_threshold_tokens: Option<i64>,
     pub reminder_message_template: String,
     pub guidance_message: Option<String>,
+    pub auto_compact_fallback_prompt: Option<String>,
+    pub auto_compact_fallback_buffer_tokens: Option<i64>,
+}
+
+impl TokenBudgetConfig {
+    pub(crate) fn fallback_buffer_tokens(&self) -> i64 {
+        if self.auto_compact_fallback_prompt.is_some() {
+            self.auto_compact_fallback_buffer_tokens.unwrap_or(0)
+        } else {
+            0
+        }
+    }
 }
 
 impl Default for TokenBudgetConfig {
@@ -1119,6 +1182,8 @@ impl Default for TokenBudgetConfig {
             reminder_threshold_tokens: None,
             reminder_message_template: DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE.to_string(),
             guidance_message: None,
+            auto_compact_fallback_prompt: None,
+            auto_compact_fallback_buffer_tokens: None,
         }
     }
 }
@@ -1242,6 +1307,12 @@ impl AuthManagerConfig for Config {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ConfigBuildPhase {
+    CloudConfigBootstrap,
+    Authoritative,
+}
+
 #[derive(Clone, Default)]
 pub struct ConfigBuilder {
     codex_home: Option<PathBuf>,
@@ -1300,10 +1371,15 @@ impl ConfigBuilder {
 
     pub async fn build(self) -> std::io::Result<Config> {
         // Keep the large config-loading future off small runtime thread stacks.
-        Box::pin(self.build_inner()).await
+        Box::pin(self.build_inner(ConfigBuildPhase::Authoritative)).await
     }
 
-    async fn build_inner(self) -> std::io::Result<Config> {
+    /// Builds the preliminary config needed to initialize cloud config loading.
+    pub async fn build_for_cloud_config_bootstrap(self) -> std::io::Result<Config> {
+        Box::pin(self.build_inner(ConfigBuildPhase::CloudConfigBootstrap)).await
+    }
+
+    async fn build_inner(self, build_phase: ConfigBuildPhase) -> std::io::Result<Config> {
         let Self {
             codex_home,
             cli_overrides,
@@ -1388,12 +1464,13 @@ impl ConfigBuilder {
                 config_layer_stack.requirements().clone(),
                 config_layer_stack.requirements_toml().clone(),
             )?;
-            let mut config = Config::load_config_with_layer_stack(
+            let mut config = Config::load_config_with_layer_stack_and_options(
                 LOCAL_FS.as_ref(),
                 lock_config_toml,
                 harness_overrides,
                 codex_home,
                 lock_config_layer_stack,
+                build_phase,
             )
             .await?;
             config.config_lock_toml = Some(Arc::new(expected_lock_config));
@@ -1402,12 +1479,13 @@ impl ConfigBuilder {
                 save_fields_resolved_from_model_catalog;
             return Ok(config);
         }
-        Config::load_config_with_layer_stack(
+        Config::load_config_with_layer_stack_and_options(
             LOCAL_FS.as_ref(),
             config_toml,
             harness_overrides,
             codex_home,
             config_layer_stack,
+            build_phase,
         )
         .await
     }
@@ -2278,9 +2356,9 @@ fn resolve_windows_git_bash_config(
     configured_git_bash_path: Option<&PathBuf>,
 ) -> std::io::Result<Option<GitBashShell>> {
     if !cfg!(windows)
-        || !matches!(
-            windows_default_shell.unwrap_or(WindowsDefaultShellToml::GitBash),
-            WindowsDefaultShellToml::GitBash
+        || matches!(
+            windows_default_shell,
+            Some(WindowsDefaultShellToml::PowerShell | WindowsDefaultShellToml::Cmd)
         )
     {
         return Ok(None);
@@ -2291,14 +2369,14 @@ fn resolve_windows_git_bash_config(
         None => GitBashPathHint::SearchPath,
     };
 
-    codex_shell_command::shell_detect::find_git_bash_shell(path_hint)
-        .map(Some)
-        .map_err(|err| {
-            std::io::Error::new(
-                ErrorKind::InvalidInput,
-                format!("invalid Windows shell configuration: {err}"),
-            )
-        })
+    match codex_shell_command::shell_detect::find_git_bash_shell(path_hint) {
+        Ok(git_bash) => Ok(Some(git_bash)),
+        Err(_) if windows_default_shell.is_none() && configured_git_bash_path.is_none() => Ok(None),
+        Err(err) => Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid Windows shell configuration: {err}"),
+        )),
+    }
 }
 
 fn is_session_layer(source: &ConfigLayerSource) -> bool {
@@ -2664,10 +2742,44 @@ fn resolve_token_budget_config(
         ));
     }
 
+    let auto_compact_fallback_prompt = token_budget_config
+        .and_then(|config| config.auto_compact_fallback_prompt.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if auto_compact_fallback_prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.len() > AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "features.token_budget.auto_compact_fallback_prompt must not exceed {AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES} bytes"
+            ),
+        ));
+    }
+
+    let auto_compact_fallback_buffer_tokens =
+        token_budget_config.and_then(|config| config.auto_compact_fallback_buffer_tokens);
+    if auto_compact_fallback_prompt.is_some() && auto_compact_fallback_buffer_tokens.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "features.token_budget.auto_compact_fallback_buffer_tokens is required when auto_compact_fallback_prompt is set",
+        ));
+    }
+    if auto_compact_fallback_buffer_tokens.is_some_and(|tokens| tokens <= 0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "features.token_budget.auto_compact_fallback_buffer_tokens must be positive",
+        ));
+    }
+
     Ok(Some(TokenBudgetConfig {
         reminder_threshold_tokens,
         reminder_message_template,
         guidance_message,
+        auto_compact_fallback_prompt,
+        auto_compact_fallback_buffer_tokens,
     }))
 }
 
@@ -3007,6 +3119,25 @@ impl Config {
         overrides: ConfigOverrides,
         codex_home: AbsolutePathBuf,
         config_layer_stack: ConfigLayerStack,
+    ) -> std::io::Result<Self> {
+        Self::load_config_with_layer_stack_and_options(
+            fs,
+            cfg,
+            overrides,
+            codex_home,
+            config_layer_stack,
+            ConfigBuildPhase::Authoritative,
+        )
+        .await
+    }
+
+    async fn load_config_with_layer_stack_and_options(
+        fs: &dyn ExecutorFileSystem,
+        cfg: ConfigToml,
+        overrides: ConfigOverrides,
+        codex_home: AbsolutePathBuf,
+        config_layer_stack: ConfigLayerStack,
+        build_phase: ConfigBuildPhase,
     ) -> std::io::Result<Self> {
         // Keep the large config-construction future off small test thread stacks.
         Box::pin(async move {
@@ -3819,6 +3950,17 @@ impl Config {
             network_requirements,
             &network_permission_profile,
         )?;
+        if matches!(build_phase, ConfigBuildPhase::Authoritative) {
+            let network_proxy_enabled = network.as_ref().is_some_and(NetworkProxySpec::enabled);
+            validate_windows_network_proxy_requirements(
+                config_layer_stack.requirements_toml(),
+                network_proxy_enabled,
+            )?;
+            validate_windows_sandbox_network_proxy_compatibility(
+                windows_sandbox_level,
+                network_proxy_enabled,
+            )?;
+        }
         let mut helper_readable_roots = get_readable_roots_required_for_codex_runtime(
             &codex_home,
             zsh_path.as_ref(),
@@ -4224,11 +4366,21 @@ impl Config {
             NetworkProxyConfig::default()
         };
 
-        build_network_proxy_spec(
+        let network = build_network_proxy_spec(
             configured_network_proxy_config,
             self.config_layer_stack.requirements().network.clone(),
             permission_profile,
-        )
+        )?;
+        let network_proxy_enabled = network.as_ref().is_some_and(NetworkProxySpec::enabled);
+        validate_windows_network_proxy_requirements(
+            self.config_layer_stack.requirements_toml(),
+            network_proxy_enabled,
+        )?;
+        validate_windows_sandbox_network_proxy_compatibility(
+            WindowsSandboxLevel::from_config(self),
+            network_proxy_enabled,
+        )?;
+        Ok(network)
     }
 
     pub fn bundled_skills_enabled(&self) -> bool {

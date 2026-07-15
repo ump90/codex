@@ -111,6 +111,7 @@ async fn shell_command_handler_to_exec_params_uses_selected_environment() {
                 .environment,
         ),
         PathUri::from_abs_path(&selected_cwd),
+        Vec::new(),
         Some(selected_shell),
     );
     let mut expected_env = create_env(
@@ -193,6 +194,7 @@ async fn shell_command_handler_for_windows_bash_forces_utf8_locale() {
                 .environment,
         ),
         PathUri::from_abs_path(&selected_cwd),
+        vec![PathUri::from_abs_path(&selected_cwd)],
         Some(selected_shell),
     );
     let params = ShellCommandToolCallParams {

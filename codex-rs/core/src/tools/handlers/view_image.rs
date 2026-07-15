@@ -11,6 +11,8 @@ use codex_utils_image::data_url_from_bytes;
 use serde::Deserialize;
 
 use crate::function_tool::FunctionCallError;
+use crate::git_bash_paths::format_path_uri_for_shell;
+use crate::git_bash_paths::path_display_style_for_shell;
 use crate::original_image_detail::can_request_original_image_detail;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -146,22 +148,22 @@ impl ViewImageHandler {
             .shell
             .as_ref()
             .map_or_else(|| session_shell.name(), |shell| shell.name());
+        let path_display_style =
+            path_display_style_for_shell(Some(shell_name), turn_environment.cwd());
         let path = normalize_git_bash_path_argument_for_shell(
             path,
             Some(shell_name),
             turn_environment.cwd(),
         );
         let path_uri = turn_environment.cwd().join(&path).map_err(|err| {
+            let cwd = format_path_uri_for_shell(turn_environment.cwd(), path_display_style);
             FunctionCallError::RespondToModel(format!(
-                "unable to resolve image path `{path}` against environment cwd `{}`: {err}",
-                turn_environment.cwd(),
+                "unable to resolve image path `{path}` against environment cwd `{cwd}`: {err}",
             ))
         })?;
-        let model_visible_path = path_uri.inferred_native_path_string();
-        let sandbox = turn.file_system_sandbox_context(
-            /*additional_permissions*/ None,
-            turn_environment.cwd(),
-        );
+        let model_visible_path = format_path_uri_for_shell(&path_uri, path_display_style);
+        let sandbox = turn
+            .file_system_sandbox_context(/*additional_permissions*/ None, turn_environment);
         let fs = turn_environment.environment.get_filesystem();
 
         let metadata = fs
@@ -273,6 +275,10 @@ mod tests {
     use tokio::sync::Mutex;
 
     fn replace_primary_environment_cwd(turn: &mut crate::TurnContext, cwd: AbsolutePathBuf) {
+        replace_primary_environment_cwd_uri(turn, PathUri::from_abs_path(&cwd));
+    }
+
+    fn replace_primary_environment_cwd_uri(turn: &mut crate::TurnContext, cwd: PathUri) {
         let current = turn
             .environments
             .turn_environments
@@ -282,7 +288,8 @@ mod tests {
         turn.environments.turn_environments[0] = TurnEnvironment::new(
             current.environment_id,
             current.environment,
-            PathUri::from_abs_path(&cwd),
+            cwd,
+            Vec::new(),
             current.shell,
         );
     }
@@ -384,6 +391,59 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn handle_reports_git_bash_paths_to_model() {
+        let (session, mut turn) = make_session_and_context().await;
+        let current = turn
+            .environments
+            .turn_environments
+            .first()
+            .cloned()
+            .expect("default local turn environment");
+        let bash = crate::shell::Shell::from_environment_shell_info(codex_exec_server::ShellInfo {
+            name: "bash".to_string(),
+            path: "bash".to_string(),
+        })
+        .expect("bash shell info");
+        turn.environments.turn_environments[0] = TurnEnvironment::new(
+            current.environment_id,
+            current.environment,
+            PathUri::parse("file:///C:/Users/Alice/project").expect("Windows cwd URI"),
+            Vec::new(),
+            Some(bash),
+        );
+        Arc::make_mut(&mut turn.config)
+            .permissions
+            .set_permission_profile(PermissionProfile::Disabled)
+            .expect("set permission profile");
+        let turn = Arc::new(turn);
+
+        let result = ViewImageHandler::default()
+            .handle(ToolInvocation {
+                session: Arc::new(session),
+                step_context: StepContext::for_test(Arc::clone(&turn)),
+                turn,
+                cancellation_token: tokio_util::sync::CancellationToken::new(),
+                tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
+                call_id: "call-view-image".to_string(),
+                tool_name: codex_tools::ToolName::plain("view_image"),
+                source: ToolCallSource::Direct,
+                payload: ToolPayload::Function {
+                    arguments: json!({ "path": "missing.png" }).to_string(),
+                },
+            })
+            .await;
+
+        let Err(FunctionCallError::RespondToModel(message)) = result else {
+            panic!("expected missing image error");
+        };
+        assert!(
+            message.contains("`/c/Users/Alice/project/missing.png`"),
+            "{message}"
+        );
+        assert!(!message.contains(r"C:\Users\Alice"), "{message}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn handle_accepts_explicit_high_detail() {
         let (session, mut turn) = make_session_and_context().await;
@@ -393,7 +453,10 @@ mod tests {
         replace_primary_environment_cwd(&mut turn, image_cwd.clone());
         let image_path = image_cwd.join("image.png");
         std::fs::write(image_path.as_path(), b"not a real image").expect("write test image");
-        turn.permission_profile = PermissionProfile::Disabled;
+        Arc::make_mut(&mut turn.config)
+            .permissions
+            .set_permission_profile(PermissionProfile::Disabled)
+            .expect("set permission profile");
         let turn = Arc::new(turn);
 
         let result = ViewImageHandler::default()

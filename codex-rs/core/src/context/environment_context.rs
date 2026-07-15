@@ -4,13 +4,13 @@ use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSpecialPath;
-use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use crate::git_bash_paths::PathDisplayStyle;
 use crate::git_bash_paths::format_native_path_for_shell;
 use crate::git_bash_paths::format_path_text_for_shell;
+use crate::git_bash_paths::format_path_uri_for_shell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSystemContext {
@@ -38,15 +38,19 @@ enum ManagedFileSystemContext {
 impl FileSystemContext {
     pub(super) fn from_permission_profile(
         permission_profile: &PermissionProfile,
-        workspace_roots: &[AbsolutePathBuf],
+        workspace_roots: &[PathUri],
         path_display_style: PathDisplayStyle,
     ) -> Self {
+        let materialized_workspace_roots = workspace_roots
+            .iter()
+            .filter_map(|workspace_root| workspace_root.to_abs_path().ok())
+            .collect::<Vec<_>>();
         let permission_profile = permission_profile
             .clone()
-            .materialize_project_roots_with_workspace_roots(workspace_roots);
+            .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
         let workspace_roots = workspace_roots
             .iter()
-            .map(|root| format_native_path_for_shell(root.as_path(), path_display_style))
+            .map(|root| format_path_uri_for_shell(root, path_display_style))
             .collect();
         let permission_profile = match permission_profile {
             PermissionProfile::Managed { file_system, .. } => {
@@ -198,13 +202,12 @@ fn render_special_path(
 
 fn render_special_path_with_subpath(
     base: &str,
-    subpath: &Option<PathBuf>,
+    subpath: &Option<String>,
     path_display_style: PathDisplayStyle,
 ) -> String {
     match subpath {
         Some(subpath) => {
-            let subpath =
-                format_path_text_for_shell(&subpath.to_string_lossy(), path_display_style);
+            let subpath = format_path_text_for_shell(subpath, path_display_style);
             format!("{base}/{subpath}")
         }
         None => base.to_string(),
@@ -237,22 +240,26 @@ pub(crate) fn push_xml_escaped_text(rendered: &mut String, value: &str) {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct NetworkContext {
+    enabled: bool,
     allowed_domains: Vec<String>,
     denied_domains: Vec<String>,
 }
 
 impl NetworkContext {
-    pub(crate) fn new(allowed_domains: Vec<String>, denied_domains: Vec<String>) -> Self {
+    pub(crate) fn new(enabled: bool, allowed: Vec<String>, denied: Vec<String>) -> Self {
         Self {
-            allowed_domains,
-            denied_domains,
+            enabled,
+            allowed_domains: allowed,
+            denied_domains: denied,
         }
     }
 
     pub(super) fn render(&self) -> String {
-        let mut rendered = "<network enabled=\"true\">".to_string();
-        Self::push_rendered_domain_element(&mut rendered, "allowed", &self.allowed_domains);
-        Self::push_rendered_domain_element(&mut rendered, "denied", &self.denied_domains);
+        let mut rendered = format!("<network enabled=\"{}\">", self.enabled);
+        if self.enabled {
+            Self::push_rendered_domain_element(&mut rendered, "allowed", &self.allowed_domains);
+            Self::push_rendered_domain_element(&mut rendered, "denied", &self.denied_domains);
+        }
         rendered.push_str("</network>");
         rendered
     }

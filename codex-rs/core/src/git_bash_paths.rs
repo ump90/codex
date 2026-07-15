@@ -1,5 +1,6 @@
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
+use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
 
@@ -119,44 +120,53 @@ fn is_windows_separator(byte: u8) -> bool {
 
 pub(crate) fn rewrite_git_bash_path_arguments(arguments: &str) -> serde_json::Result<String> {
     let mut value: Value = serde_json::from_str(arguments)?;
-    rewrite_git_bash_path_arguments_value(&mut value);
+    transform_tool_paths(&mut value, git_bash_path_to_windows_path);
     serde_json::to_string(&value)
 }
 
-fn rewrite_git_bash_path_arguments_value(value: &mut Value) {
+pub(crate) fn format_git_bash_path_output<T: Serialize>(output: &T) -> serde_json::Result<String> {
+    let mut value = serde_json::to_value(output)?;
+    transform_tool_paths(&mut value, windows_path_to_git_bash_path);
+    serde_json::to_string(&value)
+}
+
+fn transform_tool_paths(value: &mut Value, transform: fn(&str) -> Option<String>) {
     let Value::Object(arguments) = value else {
         return;
     };
 
-    rewrite_string_field(arguments.get_mut("workdir"));
-    rewrite_permission_profile(arguments.get_mut("additional_permissions"));
-    rewrite_permission_profile(arguments.get_mut("permissions"));
+    transform_string_field(arguments.get_mut("workdir"), transform);
+    transform_permission_profile(arguments.get_mut("additional_permissions"), transform);
+    transform_permission_profile(arguments.get_mut("permissions"), transform);
 }
 
-fn rewrite_permission_profile(value: Option<&mut Value>) {
+fn transform_permission_profile(value: Option<&mut Value>, transform: fn(&str) -> Option<String>) {
     let Some(Value::Object(profile)) = value else {
         return;
     };
-    rewrite_file_system_permissions(profile.get_mut("file_system"));
+    transform_file_system_permissions(profile.get_mut("file_system"), transform);
 }
 
-fn rewrite_file_system_permissions(value: Option<&mut Value>) {
+fn transform_file_system_permissions(
+    value: Option<&mut Value>,
+    transform: fn(&str) -> Option<String>,
+) {
     let Some(Value::Object(file_system)) = value else {
         return;
     };
 
-    rewrite_string_array_field(file_system.get_mut("read"));
-    rewrite_string_array_field(file_system.get_mut("write"));
+    transform_string_array_field(file_system.get_mut("read"), transform);
+    transform_string_array_field(file_system.get_mut("write"), transform);
 
     let Some(Value::Array(entries)) = file_system.get_mut("entries") else {
         return;
     };
     for entry in entries {
-        rewrite_file_system_entry(entry);
+        transform_file_system_entry(entry, transform);
     }
 }
 
-fn rewrite_file_system_entry(value: &mut Value) {
+fn transform_file_system_entry(value: &mut Value, transform: fn(&str) -> Option<String>) {
     let Value::Object(entry) = value else {
         return;
     };
@@ -165,26 +175,26 @@ fn rewrite_file_system_entry(value: &mut Value) {
     };
 
     match path.get("type").and_then(Value::as_str) {
-        Some("path") => rewrite_string_field(path.get_mut("path")),
-        Some("glob_pattern") => rewrite_string_field(path.get_mut("pattern")),
+        Some("path") => transform_string_field(path.get_mut("path"), transform),
+        Some("glob_pattern") => transform_string_field(path.get_mut("pattern"), transform),
         Some("special") | None | Some(_) => {}
     }
 }
 
-fn rewrite_string_array_field(value: Option<&mut Value>) {
+fn transform_string_array_field(value: Option<&mut Value>, transform: fn(&str) -> Option<String>) {
     let Some(Value::Array(paths)) = value else {
         return;
     };
     for path in paths {
-        rewrite_string_field(Some(path));
+        transform_string_field(Some(path), transform);
     }
 }
 
-fn rewrite_string_field(value: Option<&mut Value>) {
+fn transform_string_field(value: Option<&mut Value>, transform: fn(&str) -> Option<String>) {
     let Some(Value::String(path)) = value else {
         return;
     };
-    if let Some(rewritten) = git_bash_path_to_windows_path(path) {
+    if let Some(rewritten) = transform(path) {
         *path = rewritten;
     }
 }
@@ -301,6 +311,35 @@ mod tests {
             })
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn formats_known_tool_output_paths_for_git_bash() -> anyhow::Result<()> {
+        let output = json!({
+            "permissions": {
+                "file_system": {
+                    "read": [r"C:\Users\Alice\read"],
+                    "write": [r"D:\work"]
+                }
+            },
+            "scope": "turn"
+        });
+
+        let formatted: Value = serde_json::from_str(&format_git_bash_path_output(&output)?)?;
+
+        assert_eq!(
+            formatted,
+            json!({
+                "permissions": {
+                    "file_system": {
+                        "read": ["/c/Users/Alice/read"],
+                        "write": ["/d/work"]
+                    }
+                },
+                "scope": "turn"
+            })
+        );
         Ok(())
     }
 }

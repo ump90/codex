@@ -535,7 +535,7 @@ def main() -> int:
         )
         add("RO: Git Bash install root readable", rc == 0, f"rc={rc}, git_root={git_root}, err={err}")
     else:
-        add("Git Bash sandbox tests (optional, skipped)", True, "Git for Windows Bash not found")
+        add("Git Bash sandbox tests", False, "Git for Windows Bash not found")
 
     # 24. WS: PS bytes write (OK)
     rc, out, err = run_sbx("workspace-write",

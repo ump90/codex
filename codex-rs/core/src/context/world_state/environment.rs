@@ -31,18 +31,21 @@ impl EnvironmentsState {
         turn_context: &TurnContext,
         environments: &TurnEnvironmentSnapshot,
     ) -> Self {
-        let path_display_style = environments
-            .primary()
+        let primary = environments.primary();
+        let path_display_style = primary
             .map(path_display_style_for_environment)
             .unwrap_or(PathDisplayStyle::Native);
+        let workspace_roots = primary
+            .map(TurnEnvironment::workspace_roots)
+            .unwrap_or_default();
         Self {
             environments: environment_states(environments),
             current_date: turn_context.current_date.clone(),
             timezone: turn_context.timezone.clone(),
             network: network_from_turn_context(turn_context),
             filesystem: Some(FileSystemContext::from_permission_profile(
-                &turn_context.permission_profile,
-                &turn_context.config.effective_workspace_roots(),
+                turn_context.config.permissions.permission_profile(),
+                workspace_roots,
                 path_display_style,
             )),
             subagents: None,
@@ -392,6 +395,7 @@ fn network_from_turn_context(turn_context: &TurnContext) -> Option<NetworkContex
         .as_ref()?;
 
     Some(NetworkContext::new(
+        turn_context.network.is_some(),
         network
             .domains
             .as_ref()

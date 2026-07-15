@@ -86,6 +86,17 @@ fn default_user_shell_for_windows_config_uses_git_bash_by_default() -> anyhow::R
 }
 
 #[test]
+fn default_user_shell_for_windows_config_falls_back_to_powershell() -> anyhow::Result<()> {
+    let shell = default_user_shell_for_windows_config(
+        /*default_shell*/ None, /*git_bash_path*/ None,
+    )?;
+
+    assert_eq!(shell.shell_type, ShellType::PowerShell);
+
+    Ok(())
+}
+
+#[test]
 fn default_user_shell_for_windows_config_rejects_invalid_git_bash_path() -> anyhow::Result<()> {
     let fixture = TempFixture::new("git-bash-invalid")?;
     let bash_path = fixture

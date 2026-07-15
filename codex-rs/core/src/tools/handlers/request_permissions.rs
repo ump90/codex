@@ -2,6 +2,9 @@ use codex_protocol::request_permissions::RequestPermissionsArgs;
 use codex_sandboxing::policy_transforms::normalize_additional_permissions;
 
 use crate::function_tool::FunctionCallError;
+use crate::git_bash_paths::PathDisplayStyle;
+use crate::git_bash_paths::format_git_bash_path_output;
+use crate::git_bash_paths::path_display_style_for_shell;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -79,6 +82,8 @@ impl RequestPermissionsHandler {
             .shell
             .as_ref()
             .map_or_else(|| session_shell.name(), |shell| shell.name());
+        let path_display_style =
+            path_display_style_for_shell(Some(shell_name), turn_environment.cwd());
         let arguments = normalize_git_bash_path_arguments_for_shell(
             arguments,
             Some(shell_name),
@@ -118,7 +123,11 @@ impl RequestPermissionsHandler {
                 )
             })?;
 
-        let content = serde_json::to_string(&response).map_err(|err| {
+        let content = match path_display_style {
+            PathDisplayStyle::Native => serde_json::to_string(&response),
+            PathDisplayStyle::GitBash => format_git_bash_path_output(&response),
+        }
+        .map_err(|err| {
             FunctionCallError::Fatal(format!(
                 "failed to serialize request_permissions response: {err}"
             ))
