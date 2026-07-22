@@ -310,11 +310,6 @@ impl PathUri {
                 })?;
         // An absolute native path is already fully resolved, so replace the base URI's main path
         // instead of appending it.
-        if convention == PathConvention::Windows
-            && let Some(absolute) = parse_git_bash_drive_absolute_path(path)
-        {
-            return Ok(absolute);
-        }
         if let Some(absolute) = Self::from_absolute_native_path(path, convention) {
             return Ok(absolute);
         }
@@ -641,23 +636,6 @@ fn parse_windows_path(path: &str) -> Option<PathUri> {
     }
 
     None
-}
-
-fn parse_git_bash_drive_absolute_path(path: &str) -> Option<PathUri> {
-    let path = path.strip_prefix('/')?;
-    let mut components = path.split('/');
-    let drive = components.next()?;
-    let drive_bytes = drive.as_bytes();
-    if !matches!(drive_bytes, [drive] if drive.is_ascii_alphabetic()) {
-        return None;
-    }
-
-    let drive_segment = format!("{}:", (drive_bytes[0] as char).to_ascii_uppercase());
-    path_uri_from_segments(
-        PathConvention::Windows,
-        /*host*/ None,
-        std::iter::once(drive_segment.as_str()).chain(components),
-    )
 }
 
 fn windows_opaque_path_uri(path: &str) -> PathUri {
