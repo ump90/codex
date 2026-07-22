@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
+use codex_utils_absolute_path::test_support::PathExt;
 use sqlx::AssertSqlSafe;
+use sqlx::Connection;
 use sqlx::Row;
 use sqlx::SqlSafeStr;
 use sqlx::migrate::Migration;
@@ -10,6 +12,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use super::STATE_MIGRATOR;
 use super::line_ending_compatible_migrator;
 use super::repair_legacy_recency_migration_version;
+use crate::state_db_path;
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
@@ -42,12 +45,112 @@ fn crlf_migration(migration: &Migration) -> Migration {
 }
 
 #[tokio::test]
-async fn recency_migration_backfills_and_seeds_old_binary_inserts() {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+async fn agent_job_tables_are_dropped_when_upgrading() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
         .await
-        .expect("in-memory database should open");
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 15)
+        .run(&pool)
+        .await
+        .expect("agent job migrations should apply");
+
+    sqlx::query(
+        r#"
+INSERT INTO agent_jobs (
+    id,
+    name,
+    status,
+    instruction,
+    input_headers_json,
+    input_csv_path,
+    output_csv_path,
+    created_at,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("job-1")
+    .bind("legacy job")
+    .bind("running")
+    .bind("process rows")
+    .bind(r#"["path"]"#)
+    .bind("/tmp/input.csv")
+    .bind("/tmp/output.csv")
+    .bind(1_700_000_000_i64)
+    .bind(1_700_000_000_i64)
+    .execute(&pool)
+    .await
+    .expect("legacy agent job should insert");
+    sqlx::query(
+        r#"
+INSERT INTO agent_job_items (
+    job_id,
+    item_id,
+    row_index,
+    row_json,
+    status,
+    result_json,
+    created_at,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("job-1")
+    .bind("item-1")
+    .bind(0_i64)
+    .bind(r#"{"path":"secret.csv"}"#)
+    .bind("completed")
+    .bind(r#"{"result":"legacy"}"#)
+    .bind(1_700_000_000_i64)
+    .bind(1_700_000_000_i64)
+    .execute(&pool)
+    .await
+    .expect("legacy agent job item should insert");
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("current migrations should apply");
+
+    let agent_job_tables = sqlx::query_scalar::<_, String>(
+        r#"
+SELECT name
+FROM sqlite_master
+WHERE type = 'table' AND name IN ('agent_jobs', 'agent_job_items')
+ORDER BY name
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("remaining agent job tables should load");
+    assert_eq!(agent_job_tables, Vec::<String>::new());
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn recency_migration_backfills_and_seeds_old_binary_inserts() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .await
+        .expect("sqlite database should open");
     migrator_through(/*version*/ 37)
         .run(&pool)
         .await
@@ -143,6 +246,8 @@ INSERT INTO threads (
         .expect("old-binary row should load");
     assert_eq!(seeded.get::<i64, _>("recency_at"), 1_700_000_300);
     assert_eq!(seeded.get::<i64, _>("recency_at_ms"), 1_700_000_300_456);
+
+    pool.close().await;
 }
 
 #[tokio::test]
@@ -181,11 +286,18 @@ async fn repairs_line_ending_only_migration_checksum_mismatch() {
 
 #[tokio::test]
 async fn repairs_recency_migration_that_was_applied_as_version_38() {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
         .await
-        .expect("in-memory database should open");
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .await
+        .expect("sqlite database should open");
     migrator_through(/*version*/ 37)
         .run(&pool)
         .await
@@ -256,4 +368,47 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         })
         .collect::<Vec<_>>();
     assert_eq!(applied, expected);
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn repair_recency_migration_succeeds_while_another_connection_holds_writer_slot() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = state_db_path(&sqlite_home);
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("database should open");
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("current migrations should apply");
+    let read_pool = sqlite
+        .open_read_only_pool(&state_path)
+        .await
+        .expect("read-only pool should open");
+    let mut write_connection = pool.acquire().await.expect("write connection should open");
+    let write_transaction = write_connection
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("write transaction should acquire the writer slot");
+
+    let repair_result = repair_legacy_recency_migration_version(&read_pool, &STATE_MIGRATOR).await;
+
+    write_transaction
+        .rollback()
+        .await
+        .expect("write transaction should roll back");
+    drop(write_connection);
+    read_pool.close().await;
+    pool.close().await;
+    repair_result.expect("current migration history should not need the writer slot");
 }

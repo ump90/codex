@@ -68,6 +68,27 @@ pub(crate) async fn repair_legacy_recency_migration_version(
     }
 
     for checksum in current_and_line_ending_checksums(recency_migration) {
+        let legacy_recency_needs_repair = sqlx::query_scalar::<_, i64>(
+            r#"
+SELECT 1
+FROM _sqlx_migrations
+WHERE version = ?
+  AND checksum = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM _sqlx_migrations WHERE version = ?
+  )
+        "#,
+        )
+        .bind(38_i64)
+        .bind(&checksum)
+        .bind(recency_migration.version)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+        if !legacy_recency_needs_repair {
+            continue;
+        }
+
         sqlx::query(
             r#"
 UPDATE _sqlx_migrations
@@ -86,6 +107,7 @@ WHERE version = ?
         .bind(recency_migration.version)
         .execute(pool)
         .await?;
+        break;
     }
     Ok(())
 }

@@ -259,6 +259,7 @@ impl ToolOutput for ViewImageOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment_selection::TurnEnvironmentState;
     use crate::session::step_context::StepContext;
     use crate::session::tests::make_session_and_context;
     use crate::session::turn_context::TurnEnvironment;
@@ -281,17 +282,17 @@ mod tests {
     fn replace_primary_environment_cwd_uri(turn: &mut crate::TurnContext, cwd: PathUri) {
         let current = turn
             .environments
-            .turn_environments
-            .first()
+            .turn_environments()
+            .next()
             .cloned()
             .expect("default local turn environment");
-        turn.environments.turn_environments[0] = TurnEnvironment::new(
+        turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
             current.environment_id,
             current.environment,
             cwd,
             Vec::new(),
             current.shell,
-        );
+        ));
     }
 
     #[test]
@@ -396,8 +397,8 @@ mod tests {
         let (session, mut turn) = make_session_and_context().await;
         let current = turn
             .environments
-            .turn_environments
-            .first()
+            .turn_environments()
+            .next()
             .cloned()
             .expect("default local turn environment");
         let bash = crate::shell::Shell::from_environment_shell_info(codex_exec_server::ShellInfo {
@@ -405,13 +406,13 @@ mod tests {
             path: "bash".to_string(),
         })
         .expect("bash shell info");
-        turn.environments.turn_environments[0] = TurnEnvironment::new(
+        turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
             current.environment_id,
             current.environment,
             PathUri::parse("file:///C:/Users/Alice/project").expect("Windows cwd URI"),
             Vec::new(),
             Some(bash),
-        );
+        ));
         Arc::make_mut(&mut turn.config)
             .permissions
             .set_permission_profile(PermissionProfile::Disabled)
