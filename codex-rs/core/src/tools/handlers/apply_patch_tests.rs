@@ -212,6 +212,25 @@ fn reconcile_environment_id_requires_selection_when_enabled() {
     );
 }
 
+#[test]
+fn apply_patch_path_syntax_uses_actual_shell_and_cwd_convention() {
+    let windows_cwd = PathUri::parse("file:///C:/workspace").expect("valid Windows cwd URI");
+    let posix_cwd = PathUri::parse("file:///workspace").expect("valid POSIX cwd URI");
+
+    assert_eq!(
+        apply_patch_path_syntax_for_shell(Some(ShellType::Bash), &windows_cwd),
+        ApplyPatchPathSyntax::GitBash
+    );
+    assert_eq!(
+        apply_patch_path_syntax_for_shell(Some(ShellType::PowerShell), &windows_cwd),
+        ApplyPatchPathSyntax::Native
+    );
+    assert_eq!(
+        apply_patch_path_syntax_for_shell(Some(ShellType::Bash), &posix_cwd),
+        ApplyPatchPathSyntax::Native
+    );
+}
+
 #[tokio::test]
 async fn approval_keys_include_move_destination() {
     let tmp = TempDir::new().expect("tmp");

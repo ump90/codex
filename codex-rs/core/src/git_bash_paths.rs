@@ -1,5 +1,6 @@
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
+pub(crate) use codex_utils_path_uri::git_bash_path_to_windows_path;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
@@ -45,33 +46,6 @@ pub(crate) fn format_path_text_for_shell(path: &str, style: PathDisplayStyle) ->
             windows_path_to_git_bash_path(path).unwrap_or_else(|| path.replace('\\', "/"))
         }
     }
-}
-
-pub(crate) fn git_bash_path_to_windows_path(path: &str) -> Option<String> {
-    if let Some(path) = path.strip_prefix("//") {
-        if path.is_empty() {
-            return None;
-        }
-        return Some(format!(r"\\{}", path.replace('/', "\\")));
-    }
-
-    let rest = path.strip_prefix('/')?;
-    let mut parts = rest.splitn(2, '/');
-    let drive = parts.next()?;
-    let tail = parts.next();
-    let drive_bytes = drive.as_bytes();
-    if !matches!(drive_bytes, [drive] if drive.is_ascii_alphabetic()) {
-        return None;
-    }
-
-    let drive = (drive_bytes[0] as char).to_ascii_uppercase();
-    let mut windows = format!("{drive}:\\");
-    if let Some(tail) = tail
-        && !tail.is_empty()
-    {
-        windows.push_str(&tail.replace('/', "\\"));
-    }
-    Some(windows)
 }
 
 fn windows_path_to_git_bash_path(path: &str) -> Option<String> {

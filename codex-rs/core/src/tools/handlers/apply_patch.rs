@@ -10,9 +10,12 @@ use crate::apply_patch;
 use crate::apply_patch::InternalApplyPatchInvocation;
 use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::function_tool::FunctionCallError;
+use crate::git_bash_paths::PathDisplayStyle;
+use crate::git_bash_paths::path_display_style_for_shell;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
+use crate::shell::ShellType;
 use crate::tools::context::ApplyPatchToolOutput;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::SharedTurnDiffTracker;
@@ -37,6 +40,7 @@ use crate::tools::runtimes::apply_patch::ApplyPatchRuntime;
 use crate::tools::sandboxing::ToolCtx;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
+use codex_apply_patch::ApplyPatchPathSyntax;
 use codex_apply_patch::Hunk;
 use codex_apply_patch::StreamingPatchParser;
 use codex_exec_server::ExecutorFileSystem;
@@ -65,6 +69,16 @@ pub struct ApplyPatchHandler {
 impl ApplyPatchHandler {
     pub(crate) fn new(multi_environment: bool) -> Self {
         Self { multi_environment }
+    }
+}
+
+pub(crate) fn apply_patch_path_syntax_for_shell(
+    shell_type: Option<ShellType>,
+    cwd: &PathUri,
+) -> ApplyPatchPathSyntax {
+    match path_display_style_for_shell(shell_type.map(ShellType::name), cwd) {
+        PathDisplayStyle::Native => ApplyPatchPathSyntax::Native,
+        PathDisplayStyle::GitBash => ApplyPatchPathSyntax::GitBash,
     }
 }
 
@@ -385,9 +399,17 @@ impl ApplyPatchHandler {
         let fs = turn_environment.environment.get_filesystem();
         let sandbox = turn
             .file_system_sandbox_context(/*additional_permissions*/ None, turn_environment);
-        match codex_apply_patch::verify_apply_patch_args(
+        let session_shell = session.user_shell();
+        let shell_type = turn_environment
+            .shell
+            .as_ref()
+            .map_or(session_shell.shell_type, |shell| shell.shell_type);
+        let path_syntax =
+            apply_patch_path_syntax_for_shell(Some(shell_type), turn_environment.cwd());
+        match codex_apply_patch::verify_apply_patch_args_with_path_syntax(
             args,
             turn_environment.cwd(),
+            path_syntax,
             fs.as_ref(),
             Some(&sandbox),
         )

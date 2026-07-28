@@ -83,11 +83,19 @@ pub enum Hunk {
 
 impl Hunk {
     pub fn resolve_path(&self, cwd: &PathUri) -> Result<PathUri, PathUriParseError> {
+        self.resolve_path_with_syntax(cwd, crate::ApplyPatchPathSyntax::Native)
+    }
+
+    pub(crate) fn resolve_path_with_syntax(
+        &self,
+        cwd: &PathUri,
+        path_syntax: crate::ApplyPatchPathSyntax,
+    ) -> Result<PathUri, PathUriParseError> {
         let path = match self {
             Hunk::UpdateFile { path, .. } => path,
             Hunk::AddFile { .. } | Hunk::DeleteFile { .. } => self.path(),
         };
-        cwd.join(&path.to_string_lossy())
+        crate::resolve_patch_path(cwd, &path.to_string_lossy(), path_syntax)
     }
 
     /// Returns the path affected by this hunk, using the move destination for rename hunks.

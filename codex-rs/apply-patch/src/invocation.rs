@@ -13,11 +13,13 @@ use crate::ApplyPatchArgs;
 use crate::ApplyPatchError;
 use crate::ApplyPatchFileChange;
 use crate::ApplyPatchFileUpdate;
+use crate::ApplyPatchPathSyntax;
 use crate::IoError;
 use crate::MaybeApplyPatchVerified;
 use crate::parser::Hunk;
 use crate::parser::ParseError;
 use crate::parser::parse_patch;
+use crate::resolve_patch_path;
 use crate::unified_diff_from_chunks;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
@@ -157,8 +159,20 @@ pub async fn maybe_parse_apply_patch_verified(
         return MaybeApplyPatchVerified::CorrectnessError(ApplyPatchError::ImplicitInvocation);
     }
 
+    let path_syntax = match (parse_shell_script(argv, cwd), cwd.infer_path_convention()) {
+        (Some((ApplyPatchShell::Unix, _)), Some(PathConvention::Windows)) => {
+            ApplyPatchPathSyntax::GitBash
+        }
+        (Some((ApplyPatchShell::Unix, _)), Some(PathConvention::Posix) | None)
+        | (
+            Some((ApplyPatchShell::PowerShell | ApplyPatchShell::Cmd, _)) | None,
+            Some(PathConvention::Posix | PathConvention::Windows) | None,
+        ) => ApplyPatchPathSyntax::Native,
+    };
     match maybe_parse_apply_patch(argv, cwd) {
-        MaybeApplyPatch::Body(args) => verify_apply_patch_args(args, cwd, fs, sandbox).await,
+        MaybeApplyPatch::Body(args) => {
+            verify_apply_patch_args_with_path_syntax(args, cwd, path_syntax, fs, sandbox).await
+        }
         MaybeApplyPatch::ShellParseError(e) => MaybeApplyPatchVerified::ShellParseError(e),
         MaybeApplyPatch::PatchParseError(e) => MaybeApplyPatchVerified::CorrectnessError(e.into()),
         MaybeApplyPatch::NotApplyPatch => MaybeApplyPatchVerified::NotApplyPatch,
@@ -171,7 +185,18 @@ pub async fn verify_apply_patch_args(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&codex_exec_server::FileSystemSandboxContext>,
 ) -> MaybeApplyPatchVerified {
-    match try_verify_apply_patch_args(args, cwd, fs, sandbox).await {
+    verify_apply_patch_args_with_path_syntax(args, cwd, ApplyPatchPathSyntax::Native, fs, sandbox)
+        .await
+}
+
+pub async fn verify_apply_patch_args_with_path_syntax(
+    args: ApplyPatchArgs,
+    cwd: &PathUri,
+    path_syntax: ApplyPatchPathSyntax,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&codex_exec_server::FileSystemSandboxContext>,
+) -> MaybeApplyPatchVerified {
+    match try_verify_apply_patch_args(args, cwd, path_syntax, fs, sandbox).await {
         Ok(action) => MaybeApplyPatchVerified::Body(action),
         Err(err) => MaybeApplyPatchVerified::CorrectnessError(err),
     }
@@ -180,6 +205,7 @@ pub async fn verify_apply_patch_args(
 async fn try_verify_apply_patch_args(
     args: ApplyPatchArgs,
     cwd: &PathUri,
+    path_syntax: ApplyPatchPathSyntax,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&codex_exec_server::FileSystemSandboxContext>,
 ) -> Result<ApplyPatchAction, ApplyPatchError> {
@@ -191,12 +217,12 @@ async fn try_verify_apply_patch_args(
     } = args;
     let effective_cwd = workdir
         .as_ref()
-        .map(|dir| cwd.join(dir))
+        .map(|dir| resolve_patch_path(cwd, dir, path_syntax))
         .transpose()?
         .unwrap_or_else(|| cwd.clone());
     let mut changes = HashMap::new();
     for hunk in hunks {
-        let path = hunk.resolve_path(&effective_cwd)?;
+        let path = hunk.resolve_path_with_syntax(&effective_cwd, path_syntax)?;
         match hunk {
             Hunk::AddFile { contents, .. } => {
                 changes.insert(path, ApplyPatchFileChange::Add { content: contents });
@@ -223,7 +249,13 @@ async fn try_verify_apply_patch_args(
                     ApplyPatchFileChange::Update {
                         unified_diff,
                         move_path: move_path
-                            .map(|path| effective_cwd.join(&path.to_string_lossy()))
+                            .map(|path| {
+                                resolve_patch_path(
+                                    &effective_cwd,
+                                    &path.to_string_lossy(),
+                                    path_syntax,
+                                )
+                            })
                             .transpose()?,
                         new_content: contents,
                     },
@@ -235,6 +267,7 @@ async fn try_verify_apply_patch_args(
         changes,
         patch,
         cwd: effective_cwd,
+        path_syntax,
     })
 }
 
@@ -859,6 +892,7 @@ PATCH"#,
                 patch: argv[1].clone(),
                 cwd: PathUri::from_host_native_path(session_dir.path())
                     .expect("absolute test path"),
+                path_syntax: ApplyPatchPathSyntax::Native,
             })
         );
     }
@@ -919,6 +953,65 @@ PATCH"#,
             }
             other => panic!("expected update change, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn git_bash_syntax_resolves_absolute_patch_paths() {
+        let cwd = PathUri::parse("file:///C:/workspace").expect("valid Windows cwd URI");
+        let patch = "*** Begin Patch\n*** Add File: /d/project/new.txt\n+hello\n*** End Patch";
+        let args = parse_patch(patch).expect("valid patch");
+
+        let result = verify_apply_patch_args_with_path_syntax(
+            args,
+            &cwd,
+            ApplyPatchPathSyntax::GitBash,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            MaybeApplyPatchVerified::Body(ApplyPatchAction {
+                changes: HashMap::from([(
+                    PathUri::parse("file:///D:/project/new.txt").expect("valid target URI"),
+                    ApplyPatchFileChange::Add {
+                        content: "hello\n".to_string(),
+                    },
+                )]),
+                patch: patch.to_string(),
+                cwd,
+                path_syntax: ApplyPatchPathSyntax::GitBash,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn git_bash_syntax_resolves_intercepted_shell_workdir() {
+        let cwd = PathUri::parse("file:///C:/workspace").expect("valid Windows cwd URI");
+        let patch = wrap_patch("*** Add File: new.txt\n+hello");
+        let script = format!("cd /d/project && apply_patch <<'PATCH'\n{patch}\nPATCH");
+        let argv = vec!["bash".to_string(), "-lc".to_string(), script];
+
+        let result =
+            maybe_parse_apply_patch_verified(&argv, &cwd, LOCAL_FS.as_ref(), /*sandbox*/ None)
+                .await;
+        let expected_cwd = PathUri::parse("file:///D:/project").expect("valid effective cwd URI");
+
+        assert_eq!(
+            result,
+            MaybeApplyPatchVerified::Body(ApplyPatchAction {
+                changes: HashMap::from([(
+                    PathUri::parse("file:///D:/project/new.txt").expect("valid target URI"),
+                    ApplyPatchFileChange::Add {
+                        content: "hello\n".to_string(),
+                    },
+                )]),
+                patch,
+                cwd: expected_cwd,
+                path_syntax: ApplyPatchPathSyntax::GitBash,
+            })
+        );
     }
 
     #[tokio::test]

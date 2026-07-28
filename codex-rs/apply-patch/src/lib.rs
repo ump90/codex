@@ -14,8 +14,10 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::RemoveOptions;
+use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use codex_utils_path_uri::PathUriParseError;
+use codex_utils_path_uri::git_bash_path_to_windows_path;
 pub use parser::Hunk;
 pub use parser::ParseError;
 use parser::ParseError::*;
@@ -27,6 +29,7 @@ use thiserror::Error;
 
 pub use invocation::maybe_parse_apply_patch_verified;
 pub use invocation::verify_apply_patch_args;
+pub use invocation::verify_apply_patch_args_with_path_syntax;
 pub use standalone_executable::main;
 
 use crate::invocation::ExtractHeredocError;
@@ -39,6 +42,34 @@ use crate::invocation::ExtractHeredocError;
 /// process-invocation contract for the standalone `apply_patch` command
 /// surface.
 pub const CODEX_CORE_APPLY_PATCH_ARG1: &str = "--codex-run-as-apply-patch";
+
+/// Path syntax used for model-provided paths in an apply-patch invocation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ApplyPatchPathSyntax {
+    /// Interpret paths using the native convention inferred from the environment cwd.
+    #[default]
+    Native,
+    /// Convert Git Bash drive and UNC paths before applying Windows path semantics.
+    GitBash,
+}
+
+pub(crate) fn resolve_patch_path(
+    cwd: &PathUri,
+    path: &str,
+    path_syntax: ApplyPatchPathSyntax,
+) -> Result<PathUri, PathUriParseError> {
+    let normalized = match (path_syntax, cwd.infer_path_convention()) {
+        (ApplyPatchPathSyntax::GitBash, Some(PathConvention::Windows)) => {
+            git_bash_path_to_windows_path(path)
+        }
+        (
+            ApplyPatchPathSyntax::Native,
+            Some(PathConvention::Posix | PathConvention::Windows) | None,
+        )
+        | (ApplyPatchPathSyntax::GitBash, Some(PathConvention::Posix) | None) => None,
+    };
+    cwd.join(normalized.as_deref().unwrap_or(path))
+}
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ApplyPatchError {
@@ -138,6 +169,8 @@ pub enum MaybeApplyPatchVerified {
 pub struct ApplyPatchAction {
     changes: HashMap<PathUri, ApplyPatchFileChange>,
 
+    path_syntax: ApplyPatchPathSyntax,
+
     /// The raw patch argument that can be used to apply the patch. i.e., if the
     /// original arg was parsed in "lenient" mode with a
     /// heredoc, this should be the value without the heredoc wrapper.
@@ -155,6 +188,11 @@ impl ApplyPatchAction {
     /// Returns the changes that would be made by applying the patch.
     pub fn changes(&self) -> &HashMap<PathUri, ApplyPatchFileChange> {
         &self.changes
+    }
+
+    /// Returns the path syntax used when this action was verified.
+    pub fn path_syntax(&self) -> ApplyPatchPathSyntax {
+        self.path_syntax
     }
 
     /// Should be used exclusively for testing. (Not worth the overhead of
@@ -175,6 +213,7 @@ impl ApplyPatchAction {
             changes,
             cwd: path.parent().expect("path should have parent"),
             patch,
+            path_syntax: ApplyPatchPathSyntax::Native,
         }
     }
 }
@@ -281,6 +320,28 @@ pub async fn apply_patch(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    apply_patch_with_path_syntax(
+        patch,
+        cwd,
+        ApplyPatchPathSyntax::Native,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+    )
+    .await
+}
+
+/// Applies a patch using the specified syntax for paths embedded in the patch text.
+pub async fn apply_patch_with_path_syntax(
+    patch: &str,
+    cwd: &PathUri,
+    path_syntax: ApplyPatchPathSyntax,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let hunks = match parse_patch(patch) {
         Ok(source) => source.hunks,
         Err(e) => {
@@ -308,7 +369,7 @@ pub async fn apply_patch(
         }
     };
 
-    apply_hunks(&hunks, cwd, stdout, stderr, fs, sandbox).await
+    apply_hunks_with_path_syntax(&hunks, cwd, path_syntax, stdout, stderr, fs, sandbox).await
 }
 
 /// Applies hunks and continues to update stdout/stderr
@@ -320,8 +381,29 @@ pub async fn apply_hunks(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    apply_hunks_with_path_syntax(
+        hunks,
+        cwd,
+        ApplyPatchPathSyntax::Native,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+    )
+    .await
+}
+
+async fn apply_hunks_with_path_syntax(
+    hunks: &[Hunk],
+    cwd: &PathUri,
+    path_syntax: ApplyPatchPathSyntax,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let mut delta = AppliedPatchDelta::empty();
-    match apply_hunks_to_files(hunks, cwd, fs, sandbox, &mut delta).await {
+    match apply_hunks_to_files(hunks, cwd, path_syntax, fs, sandbox, &mut delta).await {
         Ok(affected_paths) => {
             print_summary(&affected_paths, stdout).map_err(|error| {
                 ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
@@ -361,6 +443,7 @@ pub struct AffectedPaths {
 async fn apply_hunks_to_files(
     hunks: &[Hunk],
     cwd: &PathUri,
+    path_syntax: ApplyPatchPathSyntax,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
     delta: &mut AppliedPatchDelta,
@@ -390,7 +473,7 @@ async fn apply_hunks_to_files(
     // TODO(anp): Carry PathUri through committed patch deltas and the turn diff tracker.
     for hunk in hunks {
         let affected_path = hunk.path().to_path_buf();
-        let path_uri = hunk.resolve_path(cwd)?;
+        let path_uri = hunk.resolve_path_with_syntax(cwd, path_syntax)?;
         match hunk {
             Hunk::AddFile { contents, .. } => {
                 let overwritten_content =
@@ -471,7 +554,7 @@ async fn apply_hunks_to_files(
                     new_contents,
                 } = derive_new_contents_from_chunks(&path_uri, chunks, fs, sandbox).await?;
                 if let Some(dest) = move_path {
-                    let dest_uri = cwd.join(&dest.to_string_lossy())?;
+                    let dest_uri = resolve_patch_path(cwd, &dest.to_string_lossy(), path_syntax)?;
                     let overwritten_move_content =
                         read_optional_file_text_for_delta(&dest_uri, fs, sandbox, &mut delta.exact)
                             .await;

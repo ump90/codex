@@ -1,6 +1,9 @@
+use core_test_support::responses::ev_apply_patch_custom_tool_call;
+use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::test_codex::test_codex;
 use tempfile::TempDir;
@@ -93,5 +96,52 @@ async fn configured_git_bash_renders_environment_context_shell() -> anyhow::Resu
         "Git Bash config should not render PowerShell shell: {environment_context}"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_git_bash_resolves_absolute_apply_patch_paths() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let fixture = TempDir::new()?;
+    let git_root = fixture.path().join("Git");
+    create_git_for_windows_fixture(&git_root)?;
+    let bash_path = git_root.join("bin").join("bash.exe");
+    let bash_path_for_config = bash_path.clone();
+    let mut builder = test_codex().with_pre_build_hook(move |home| {
+        let config = format!(
+            "[windows]\ndefault_shell = \"git-bash\"\ngit_bash_path = {}\n",
+            toml_basic_string(&bash_path_for_config)
+        );
+        std::fs::write(home.join("config.toml"), config).expect("write config.toml");
+    });
+    let test = builder.build(&server).await?;
+    let target = test.config.cwd.join("git-bash-absolute.txt");
+    let target_for_patch = windows_path_to_git_bash_path(target.as_path());
+    let patch = format!("*** Begin Patch\n*** Add File: {target_for_patch}\n+hello\n*** End Patch");
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_apply_patch_custom_tool_call("apply-1", &patch),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.submit_turn("create the file").await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let (output, success) = requests[1]
+        .custom_tool_call_output_content_and_success("apply-1")
+        .expect("apply_patch output should be sent to the model");
+    assert_eq!(success, None, "apply_patch output: {output:?}");
+    assert_eq!(std::fs::read_to_string(target)?, "hello\n");
     Ok(())
 }
