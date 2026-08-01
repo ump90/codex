@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to create or update. Also sets the Cargo version, after stripping v/rust-v prefixes."
+        description: "Release tag to create or update. Also sets the Cargo version, after stripping an optional v prefix. The upstream rust-v namespace is reserved."
         required: true
         type: string
       ref:
@@ -87,14 +87,18 @@ jobs:
             exit 1
           fi
 
+          if [[ "${RELEASE_TAG}" == rust-v* ]]; then
+            echo "release_tag must not use the upstream rust-v namespace. Got: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
           git check-ref-format "refs/tags/${RELEASE_TAG}"
 
           ref_sha="$(git rev-parse HEAD)"
-          release_version="${RELEASE_TAG#rust-v}"
-          release_version="${release_version#v}"
+          release_version="${RELEASE_TAG#v}"
           if [[ ! "${release_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
             echo "release_tag must resolve to a Cargo-compatible SemVer version. Got: ${RELEASE_TAG}" >&2
-            echo "Use a tag like 0.143.0-alpha.35-gitbash, v0.143.0, or rust-v0.143.0." >&2
+            echo "Use a tag like 0.143.0-alpha.35-gitbash or v0.143.0." >&2
             exit 1
           fi
 

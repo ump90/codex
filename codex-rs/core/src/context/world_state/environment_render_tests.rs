@@ -36,14 +36,13 @@ fn model_visible_path(path: &AbsolutePathBuf, shell: &str) -> String {
 
 fn environment(id: &str, cwd: PathUri, shell: impl Into<String>) -> (String, EnvironmentState) {
     let shell = shell.into();
-    let path_display_style = path_display_style_for_shell(Some(&shell), &cwd);
     (
         id.to_string(),
         EnvironmentState {
             cwd,
             status: EnvironmentStatus::Available,
             shell: Some(shell),
-            path_display_style,
+            is_primary: false,
         },
     )
 }
@@ -55,8 +54,16 @@ fn environment_state(
     network: Option<NetworkContext>,
     subagents: Option<String>,
 ) -> EnvironmentsState {
+    let environments = environments
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, mut environment))| {
+            environment.is_primary = index == 0;
+            (id, environment)
+        })
+        .collect();
     EnvironmentsState {
-        environments: environments.into_iter().collect(),
+        environments,
         current_date,
         timezone,
         network,
@@ -327,11 +334,11 @@ fn serialize_environment_context_with_multiple_selected_environments() {
     let expected = format!(
         r#"<environment_context>
   <environments>
-    <environment id="local">
+    <environment id="local" primary="true">
       <cwd>{}</cwd>
       <shell>bash</shell>
     </environment>
-    <environment id="remote">
+    <environment id="remote" primary="false">
       <cwd>{}</cwd>
       <shell>bash</shell>
     </environment>
@@ -371,11 +378,11 @@ fn serialize_environment_context_with_git_bash_and_remote_posix_paths() {
         context.render(),
         r#"<environment_context>
   <environments>
-    <environment id="local">
+    <environment id="local" primary="true">
       <cwd>/c/Users/Alice/project</cwd>
       <shell>bash</shell>
     </environment>
-    <environment id="remote">
+    <environment id="remote" primary="false">
       <cwd>/srv/project</cwd>
       <shell>bash</shell>
     </environment>
@@ -406,11 +413,11 @@ fn serialize_environment_context_prefers_environment_shell_when_present() {
     let expected = format!(
         r#"<environment_context>
   <environments>
-    <environment id="local">
+    <environment id="local" primary="true">
       <cwd>{}</cwd>
       <shell>powershell</shell>
     </environment>
-    <environment id="remote">
+    <environment id="remote" primary="false">
       <cwd>{}</cwd>
       <shell>cmd</shell>
     </environment>
