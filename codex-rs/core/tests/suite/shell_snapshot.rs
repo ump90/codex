@@ -684,7 +684,9 @@ async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn macos_shell_command_resolves_command_from_tied_path_snapshot() -> Result<()> {
     let builder = test_codex()
-        .with_user_shell(get_shell_by_model_provided_path(&PathBuf::from("/bin/zsh")))
+        .with_user_shell(get_shell_by_model_provided_path(&PathBuf::from(
+            "/bin/zsh",
+        ))?)
         .with_config(|config| {
             config
                 .features

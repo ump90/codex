@@ -1,11 +1,9 @@
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
 use crate::shell::Shell;
-use crate::shell::get_shell_by_model_provided_path;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -30,7 +28,6 @@ use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::generate_chunk_id;
-use codex_exec_server::Environment;
 use codex_features::Feature;
 use codex_otel::SessionTelemetry;
 use codex_otel::TOOL_CALL_UNIFIED_EXEC_METRIC;
@@ -40,11 +37,9 @@ use codex_sandboxing::SandboxablePreference;
 use codex_shell_command::shell_detect::detect_shell_type;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use codex_tools::UnifiedExecShellMode;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
-use serde::Deserialize;
 
 use super::super::shell_spec::CommandToolOptions;
 use super::super::shell_spec::create_exec_command_tool_with_environment_id;
@@ -64,12 +59,6 @@ pub(crate) struct ExecCommandHandlerOptions {
 
 pub struct ExecCommandHandler {
     options: ExecCommandHandlerOptions,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExecCommandShellArgs {
-    #[serde(default)]
-    shell: Option<String>,
 }
 
 impl Default for ExecCommandHandler {
@@ -94,38 +83,11 @@ impl ExecCommandHandler {
 pub(super) fn normalize_exec_command_git_bash_path_arguments(
     arguments: String,
     default_shell: &Shell,
-    shell_mode: &UnifiedExecShellMode,
-    environment: &Environment,
     cwd: &PathUri,
 ) -> Result<String, FunctionCallError> {
-    let shell_name = path_argument_shell_name_for_exec_command(
-        &arguments,
-        default_shell,
-        shell_mode,
-        environment,
-    )?;
-
-    normalize_git_bash_path_arguments_for_shell(arguments, Some(shell_name), cwd)
-}
-
-fn path_argument_shell_name_for_exec_command(
-    arguments: &str,
-    default_shell: &Shell,
-    shell_mode: &UnifiedExecShellMode,
-    environment: &Environment,
-) -> Result<&'static str, FunctionCallError> {
-    if environment.is_remote() || !matches!(shell_mode, UnifiedExecShellMode::Direct) {
-        return Ok(default_shell.name());
-    }
-
-    let shell_args: ExecCommandShellArgs = parse_arguments(arguments)?;
-    let Some(requested_shell) = shell_args.shell.as_deref() else {
-        return Ok(default_shell.name());
-    };
-
-    get_shell_by_model_provided_path(&PathBuf::from(requested_shell))
-        .map(|shell| shell.name())
-        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))
+    // Tool paths use the convention shown in the environment context. An explicit execution
+    // shell changes command syntax, not the path convention the model was given.
+    normalize_git_bash_path_arguments_for_shell(arguments, Some(default_shell.name()), cwd)
 }
 
 impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
@@ -202,8 +164,6 @@ impl ExecCommandHandler {
         let arguments = normalize_exec_command_git_bash_path_arguments(
             arguments,
             shell.as_ref(),
-            &shell_mode,
-            environment.as_ref(),
             turn_environment.cwd(),
         )?;
         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;

@@ -1,11 +1,15 @@
+use codex_features::Feature;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::test_codex::test_codex;
+use serde_json::Value;
+use serde_json::json;
 use tempfile::TempDir;
 use wiremock::MockServer;
 
@@ -143,5 +147,72 @@ async fn configured_git_bash_resolves_absolute_apply_patch_paths() -> anyhow::Re
         .expect("apply_patch output should be sent to the model");
     assert_eq!(success, None, "apply_patch output: {output:?}");
     assert_eq!(std::fs::read_to_string(target)?, "hello\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_git_bash_resolves_workdir_when_switching_to_cmd() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let fixture = TempDir::new()?;
+    let git_root = fixture.path().join("Git");
+    create_git_for_windows_fixture(&git_root)?;
+    let bash_path = git_root.join("bin").join("bash.exe");
+    let bash_path_for_config = bash_path.clone();
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            let config = format!(
+                "[windows]\ndefault_shell = \"git-bash\"\ngit_bash_path = {}\n",
+                toml_basic_string(&bash_path_for_config)
+            );
+            std::fs::write(home.join("config.toml"), config).expect("write config.toml");
+        })
+        .with_config(|config| {
+            config.use_experimental_unified_exec_tool = true;
+            config
+                .features
+                .enable(Feature::UnifiedExec)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+    let workdir = test.config.cwd.join("native shell workdir");
+    std::fs::create_dir_all(&workdir)?;
+    let git_bash_workdir = windows_path_to_git_bash_path(workdir.as_path());
+    let call_id = "git-bash-workdir-native-shell";
+    let args = json!({
+        "cmd": "cd",
+        "shell": "cmd.exe",
+        "workdir": git_bash_workdir,
+        "yield_time_ms": 1_000,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.submit_turn("run cmd in the requested workdir").await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("function call output should include text");
+    assert!(
+        output.contains(workdir.to_string_lossy().as_ref()),
+        "expected cmd to run in {}, got {output}",
+        workdir.display()
+    );
     Ok(())
 }

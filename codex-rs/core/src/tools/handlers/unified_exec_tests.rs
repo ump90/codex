@@ -299,9 +299,9 @@ fn touch(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 #[cfg(windows)]
-async fn exec_command_normalizes_paths_using_requested_git_bash_shell() -> anyhow::Result<()> {
+#[test]
+fn exec_command_normalizes_git_bash_paths_before_switching_to_powershell() -> anyhow::Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let git_root = temp_dir.path().join("Git");
     let bash_path = git_root.join("bin").join("bash.exe");
@@ -309,13 +309,13 @@ async fn exec_command_normalizes_paths_using_requested_git_bash_shell() -> anyho
     touch(&bash_path)?;
     touch(&git_root.join("usr").join("bin").join("msys-2.0.dll"))?;
     let default_shell = crate::shell::Shell {
-        shell_type: ShellType::PowerShell,
-        shell_path: PathBuf::from("pwsh.exe"),
+        shell_type: ShellType::Bash,
+        shell_path: bash_path,
     };
     let cwd = PathUri::parse("file:///C:/Users/Alice")?;
     let arguments = serde_json::json!({
         "cmd": "pwd",
-        "shell": bash_path,
+        "shell": "powershell.exe",
         "workdir": "/c/Users/Alice/project",
     })
     .to_string();
@@ -323,8 +323,6 @@ async fn exec_command_normalizes_paths_using_requested_git_bash_shell() -> anyho
     let normalized = exec_command::normalize_exec_command_git_bash_path_arguments(
         arguments,
         &default_shell,
-        &UnifiedExecShellMode::Direct,
-        &Environment::default_for_tests(),
         &cwd,
     )?;
     let normalized: serde_json::Value = serde_json::from_str(&normalized)?;
@@ -333,11 +331,36 @@ async fn exec_command_normalizes_paths_using_requested_git_bash_shell() -> anyho
         normalized,
         serde_json::json!({
             "cmd": "pwd",
-            "shell": bash_path,
+            "shell": "powershell.exe",
             "workdir": r"C:\Users\Alice\project",
         })
     );
 
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_command_preserves_native_paths_before_switching_to_git_bash() -> anyhow::Result<()> {
+    let default_shell = crate::shell::Shell {
+        shell_type: ShellType::PowerShell,
+        shell_path: PathBuf::from("powershell.exe"),
+    };
+    let cwd = PathUri::parse("file:///C:/Users/Alice")?;
+    let arguments = serde_json::json!({
+        "cmd": "pwd",
+        "shell": r"C:\Program Files\Git\bin\bash.exe",
+        "workdir": r"C:\Users\Alice\project",
+    })
+    .to_string();
+
+    let normalized = exec_command::normalize_exec_command_git_bash_path_arguments(
+        arguments.clone(),
+        &default_shell,
+        &cwd,
+    )?;
+
+    assert_eq!(normalized, arguments);
     Ok(())
 }
 
