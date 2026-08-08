@@ -32,23 +32,18 @@ impl EnvironmentsState {
         environments: &TurnEnvironmentSnapshot,
         current_date: Option<String>,
     ) -> Self {
-        let primary = environments.primary();
-        let path_display_style = primary
-            .map(path_display_style_for_environment)
-            .unwrap_or(PathDisplayStyle::Native);
-        let workspace_roots = primary
-            .map(TurnEnvironment::workspace_roots)
-            .unwrap_or_default();
         Self {
             environments: environment_states(environments),
             current_date,
             timezone: turn_context.timezone.clone(),
             network: network_from_turn_context(turn_context),
-            filesystem: Some(FileSystemContext::from_permission_profile(
-                turn_context.config.permissions.permission_profile(),
-                workspace_roots,
-                path_display_style,
-            )),
+            filesystem: environments.primary().map(|environment| {
+                FileSystemContext::from_permission_profile(
+                    environment.permission_profile(),
+                    environment.workspace_roots(),
+                    path_display_style_for_environment(environment),
+                )
+            }),
             subagents: None,
         }
     }

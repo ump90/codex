@@ -13,6 +13,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelMessages;
@@ -52,6 +53,7 @@ use codex_features::Feature;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_utils_path_uri::PathUri;
 
+use super::ApprovalRequestReasons;
 use super::GUARDIAN_REVIEWER_NAME;
 use super::GuardianApprovalRequest;
 use super::prompt::BUNDLED_GUARDIAN_POLICY;
@@ -80,7 +82,7 @@ pub(crate) struct GuardianReviewSessionParams {
     pub(crate) parent_turn: Arc<TurnContext>,
     pub(crate) spawn_config: Config,
     pub(crate) request: GuardianApprovalRequest,
-    pub(crate) retry_reason: Option<String>,
+    pub(crate) reasons: ApprovalRequestReasons,
     pub(crate) schema: Value,
     pub(crate) model: String,
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
@@ -135,6 +137,7 @@ fn token_usage_delta(start: &TokenUsage, end: &TokenUsage) -> TokenUsage {
         reasoning_output_tokens: (end.reasoning_output_tokens - start.reasoning_output_tokens)
             .max(0),
         total_tokens: (end.total_tokens - start.total_tokens).max(0),
+        codex_rollout_budget_units: None,
     }
 }
 
@@ -766,7 +769,7 @@ async fn run_review_on_session(
             build_guardian_prompt_items_with_parent_turn(
                 params.parent_session.as_ref(),
                 Some(params.parent_turn.as_ref()),
-                params.retry_reason.clone(),
+                params.reasons.clone(),
                 params.request.clone(),
                 prompt_mode,
             )
@@ -1026,6 +1029,7 @@ pub(crate) fn build_guardian_review_session_config(
         tenant_policy_config,
         policy_template,
     ));
+    guardian_config.base_instructions_provenance = Some(BaseInstructionsProvenance::Custom);
     guardian_config.notify = None;
     guardian_config.developer_instructions = None;
     guardian_config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
@@ -1245,7 +1249,7 @@ mod tests {
                 additional_permissions: None,
                 justification: Some("Inspect repo state.".to_string()),
             },
-            retry_reason: None,
+            reasons: ApprovalRequestReasons::default(),
             schema: super::super::prompt::guardian_output_schema(),
             model,
             reasoning_effort,
@@ -1453,6 +1457,7 @@ mod tests {
             instructions_template: None,
             instructions_variables: None,
             approvals: None,
+            collaboration_modes: None,
             auto_review: Some(AutoReviewMessages {
                 policy: Some("Use the catalog Guardian policy.".to_string()),
                 policy_template: Some(catalog_template.to_string()),
@@ -1486,6 +1491,7 @@ mod tests {
             instructions_template: None,
             instructions_variables: None,
             approvals: None,
+            collaboration_modes: None,
             auto_review: Some(AutoReviewMessages {
                 policy: Some(String::new()),
                 policy_template: None,
@@ -1527,6 +1533,7 @@ mod tests {
             instructions_template: None,
             instructions_variables: None,
             approvals: None,
+            collaboration_modes: None,
             auto_review: Some(AutoReviewMessages {
                 policy: Some(catalog_policy.to_string()),
                 policy_template: Some(String::new()),
@@ -1681,6 +1688,7 @@ mod tests {
             output_tokens: 6,
             reasoning_output_tokens: 4,
             total_tokens: 28,
+            codex_rollout_budget_units: None,
         };
         let end = TokenUsage {
             input_tokens: 15,
@@ -1689,6 +1697,7 @@ mod tests {
             output_tokens: 10,
             reasoning_output_tokens: 2,
             total_tokens: 34,
+            codex_rollout_budget_units: None,
         };
 
         assert_eq!(
@@ -1700,6 +1709,7 @@ mod tests {
                 output_tokens: 4,
                 reasoning_output_tokens: 0,
                 total_tokens: 6,
+                codex_rollout_budget_units: None,
             }
         );
     }

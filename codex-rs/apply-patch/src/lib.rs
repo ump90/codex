@@ -27,6 +27,8 @@ use similar::TextDiff;
 pub use streaming_parser::StreamingPatchParser;
 use thiserror::Error;
 
+pub use invocation::MaybeApplyPatch;
+pub use invocation::maybe_parse_apply_patch;
 pub use invocation::maybe_parse_apply_patch_verified;
 pub use invocation::verify_apply_patch_args;
 pub use invocation::verify_apply_patch_args_with_path_syntax;
