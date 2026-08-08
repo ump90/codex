@@ -1,9 +1,9 @@
 # Codex CLI Windows Git Bash fork
 
-This document records the behavior that exists only on `codex/fork-release`.
-Keep it current whenever downstream functionality is added, removed, or moved.
-The root `README.md` intentionally stays close to upstream and links here so
-future merges are less likely to conflict.
+This document records the implementation and merge-maintenance details that
+exist only on `codex/fork-release`. Keep it current whenever downstream
+functionality is added, removed, or moved. The root `README.md` is the Chinese
+user-facing guide for this fork; this file is the detailed maintainer guide.
 
 ## Install the portable Windows build
 
@@ -28,6 +28,8 @@ need to preserve existing configuration and session data.
 | Git Bash shell selection | On Windows, automatically discovers Git for Windows and prefers Git Bash. Falls back to PowerShell when Git Bash is unavailable. | `codex-rs/core/src/shell.rs`, `codex-rs/shell-command/src/shell_detect.rs`, `codex-rs/core/src/config/mod.rs` |
 | Windows shell configuration | Adds `[windows].default_shell` and `[windows].git_bash_path`. Supported shells are `git-bash`, `powershell`, and `cmd`. | `codex-rs/config/src/types.rs`, `codex-rs/core/config.schema.json` |
 | Shell-aware path conversion | Converts Windows paths such as `C:\work` to `/c/work` for Git Bash, and converts model/tool inputs back to native paths where Windows APIs require them. Covers cwd, workspace roots, permissions, tool workdirs, image paths, and tool responses. | `codex-rs/core/src/git_bash_paths.rs`, `codex-rs/utils/path-uri/src/git_bash.rs`, `codex-rs/core/src/context/environment_context.rs` |
+| Explicit shell switching | Treats the default model-visible shell as the source of structured path syntax. Selecting PowerShell or cmd for one `exec_command` changes command parsing without misreading a Git Bash-form `workdir`. | `codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs`, `codex-rs/core/src/tools/handlers/unified_exec_tests.rs` |
+| Codex App file links | Keeps Git Bash `/c/...` syntax for commands and tool arguments, but tells the model to emit native `C:/...` targets for clickable local Markdown links. | `codex-rs/core/src/context/git_bash_file_link_instructions.rs`, `codex-rs/core/src/session/world_state.rs`, `codex-rs/core/tests/suite/windows_git_bash.rs` |
 | Git Bash `apply_patch` | Interprets add, update, delete, move, and optional `cd` paths using Git Bash semantics without misreading MSYS paths such as `/usr/bin`. | `codex-rs/apply-patch/src/invocation.rs`, `codex-rs/apply-patch/src/lib.rs`, `codex-rs/core/src/tools/handlers/apply_patch.rs` |
 | Windows sandbox integration | Makes the complete Git for Windows runtime available read-only inside the Windows sandbox instead of copying only `bash.exe`. | `codex-rs/sandboxing/src/manager.rs`, `codex-rs/windows-sandbox-rs/src/helper_materialization.rs` |
 | UTF-8 Git Bash commands | Sets `LANG`, `LC_CTYPE`, and `LC_ALL` to `C.UTF-8` for Git Bash commands to reduce localized Windows encoding problems. | `codex-rs/core/src/tools/handlers/shell/shell_command.rs` |
@@ -55,6 +57,7 @@ The current downstream feature commits are grouped below for merge review:
 | Windows path semantics and portable packaging | `5f8e02f97`, `7027fffc9`, `c5ede5a4f`, `a6c50c5f2` |
 | SQLx migration line-ending compatibility | `5db47ac7c` |
 | Git Bash `apply_patch` path resolution | `10ae331da` |
+| Post-merge shell compatibility fixes | `a2c0fe3a3` |
 
 These are representative anchors, not an exhaustive replacement for
 `git log main..codex/fork-release`. Add a row or update the relevant row when a
@@ -116,9 +119,23 @@ Fork workflows:
 - `sync-upstream.yml`: synchronizes upstream into the fork's `main` branch.
 
 Fork release tags must not use upstream's `rust-v*` namespace. Use a tag such
-as `0.145.0-fork.1` or `0.145.0-gitbash.1`.
+as `<upstream-version>-fork.1` or `<upstream-version>-gitbash.1`.
 
 ## Merging upstream `main`
+
+### Current synchronization baseline
+
+As of 2026-08-08:
+
+- `main` is merged through `208f05b23`;
+- merge commit `177bc14b8` preserves the fork workflow isolation and rebases
+  environment permissions onto upstream's per-`TurnEnvironment` ownership;
+- the Git Bash environment-context, absolute `apply_patch`, and explicit
+  `cmd.exe` workdir integration tests pass on Windows;
+- `just fix -p codex-core`, `just fmt`, and both diff checks pass. The full
+  `codex-core` run completed with 2,943 passing tests; the remaining local
+  MCP/code-mode failures and Windows sandbox timeouts are tracked as baseline
+  environment failures rather than Git Bash regressions.
 
 ### Branch responsibilities
 
@@ -142,8 +159,8 @@ as `0.145.0-fork.1` or `0.145.0-gitbash.1`.
    leave a second migration path behind.
 5. Resolve `Cargo.toml`, `Cargo.lock`, and `MODULE.bazel` before regenerating
    `MODULE.bazel.lock`; do not hand-merge generated lock-file digests.
-6. Keep the root `README.md` close to upstream. Put detailed downstream notes
-   in this file to reduce recurring README conflicts.
+6. Preserve the fork-specific root `README.md` as the Chinese user guide. Put
+   implementation details and recurring merge instructions in this file.
 
 ### Upstream workflow isolation
 
@@ -184,8 +201,12 @@ At minimum, confirm that:
   and PowerShell otherwise;
 - invalid explicit `git_bash_path` values fail clearly;
 - Windows cwd and workspace roots render as `/c/...` for Git Bash;
+- local Markdown file links in a Git Bash session use native `C:/...` targets,
+  so Codex App can open them on Windows;
 - shell workdirs, permission paths, `view_image`, and `apply_patch` convert in
   both directions without converting `/usr/...` as a drive path;
+- explicitly selecting PowerShell or cmd still resolves a Git Bash-form
+  `workdir` according to the default model-visible shell;
 - the Windows sandbox can execute the bundled Portable Git runtime;
 - LF- and CRLF-recorded SQLx migration checksums both open successfully;
 - portable archives contain `codex.cmd`, Portable Git, Windows ripgrep, and all

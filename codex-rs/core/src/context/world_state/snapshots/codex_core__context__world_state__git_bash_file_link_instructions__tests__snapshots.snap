@@ -1,0 +1,33 @@
+---
+source: core/src/context/world_state/git_bash_file_link_instructions_tests.rs
+expression: "render_section_cases(&[(Absent, Absent), (Absent, Known(&disabled)),\n(Absent, Known(&enabled)), (Known(&disabled), Known(&enabled)),\n(Known(&enabled), Known(&enabled)), (Known(&enabled), Known(&disabled)),\n(Unknown, Known(&disabled)), (Unknown, Known(&enabled)),])"
+---
+Absent -> Absent
+None
+
+Absent -> false
+None
+
+Absent -> true (role - developer)
+<git_bash_file_link_instructions>
+## Windows Git Bash file links
+Use Git Bash paths such as `/c/...` in commands and structured tool path arguments. For Markdown links to local files in your response, use native Windows absolute paths with forward slashes, such as `C:/...`, in the link destination. Codex App opens local file links using native Windows paths, so do not use Git Bash `/c/...` paths in Markdown link destinations. A Git Bash path `/c/work/file.rs` maps to `C:/work/file.rs`.
+</git_bash_file_link_instructions>
+
+false -> true (role - developer)
+<git_bash_file_link_instructions>
+## Windows Git Bash file links
+Use Git Bash paths such as `/c/...` in commands and structured tool path arguments. For Markdown links to local files in your response, use native Windows absolute paths with forward slashes, such as `C:/...`, in the link destination. Codex App opens local file links using native Windows paths, so do not use Git Bash `/c/...` paths in Markdown link destinations. A Git Bash path `/c/work/file.rs` maps to `C:/work/file.rs`.
+</git_bash_file_link_instructions>
+
+true -> true
+None
+
+true -> false
+None
+
+Unknown -> false
+None
+
+Unknown -> true
+None

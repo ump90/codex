@@ -12,6 +12,7 @@ use crate::context::world_state::CompactPermissionsState;
 use crate::context::world_state::ContextWindowGuidanceState;
 use crate::context::world_state::EnvironmentsInstructionsState;
 use crate::context::world_state::EnvironmentsState;
+use crate::context::world_state::GitBashFileLinkInstructionsState;
 use crate::context::world_state::ModelInstructionsState;
 use crate::context::world_state::MultiAgentModeState;
 use crate::context::world_state::MultiAgentUsageHintState;
@@ -21,6 +22,8 @@ use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
 use crate::context::world_state::ToolsState;
 use crate::context::world_state::WorldState;
+use crate::git_bash_paths::PathDisplayStyle;
+use crate::git_bash_paths::path_display_style_for_shell;
 use codex_connectors::AppToolPolicyEvaluator;
 use codex_extension_api::WorldStateContributionInput;
 use codex_features::Feature;
@@ -221,6 +224,19 @@ impl Session {
                     .config
                     .features
                     .enabled(Feature::DeferredExecutor),
+        ));
+        let git_bash_file_link_instructions = turn_context.config.include_environment_context
+            && step_context
+                .environments
+                .primary()
+                .is_some_and(|environment| {
+                    path_display_style_for_shell(
+                        environment.shell.as_ref().map(crate::shell::Shell::name),
+                        environment.cwd(),
+                    ) == PathDisplayStyle::GitBash
+                });
+        world_state.add_section(GitBashFileLinkInstructionsState::new(
+            git_bash_file_link_instructions,
         ));
         let apps_available =
             if turn_context.config.include_apps_instructions && turn_context.apps_enabled() {

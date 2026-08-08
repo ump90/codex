@@ -1,93 +1,132 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex CLI Windows Git Bash 二开版
 
----
+这是基于 [OpenAI Codex](https://github.com/openai/codex) 的 Windows 二开分支，当前开发与发布分支为 `codex/fork-release`。
 
-## Windows Git Bash fork
+该版本保留上游 Codex 能力，并重点完善 Windows 下的 Git Bash、路径转换、沙箱执行和便携发布体验。便携包已包含 Git for Windows，解压后通过根目录的 `codex.cmd` 启动即可使用。
 
-The `codex/fork-release` branch is a downstream Windows-focused build. It adds:
+## 主要功能
 
-- automatic Git for Windows discovery and Git Bash as the preferred Windows shell;
-- Git Bash/Windows path conversion for tools, permissions, sandboxing, and `apply_patch`;
-- portable Windows CLI and Codex App release archives with bundled Portable Git;
-- LF/CRLF-compatible SQLx migration validation.
+- 自动发现 Git for Windows，并在 Windows 上优先使用 Git Bash；未找到时回退到 PowerShell。
+- 支持通过 `[windows].default_shell` 在 Git Bash、PowerShell 和 cmd 之间切换。
+- 模型上下文中的 cwd、workspace roots 和权限路径会按照默认 shell 展示，例如 Git Bash 下使用 `/d/Workspace/codex`。
+- `shell_command`、`exec_command`、`apply_patch`、`view_image` 和权限工具能够正确处理 Git Bash 与 Windows 原生路径。
+- 显式切换 PowerShell 或 cmd 只改变命令解释器，不改变模型已经看到的路径约定；Git Bash 形式的 `workdir` 仍会转换为正确的 Windows 路径。
+- Windows 沙箱可以只读使用完整的 Git for Windows 运行时，而不是只复制一个 `bash.exe`。
+- Git Bash 命令使用 `C.UTF-8` locale，降低中文 Windows 下的乱码概率。
+- 提供包含 Portable Git、ripgrep 和 Codex 辅助程序的 Windows 便携包。
+- 兼容因 LF/CRLF 行尾差异产生的历史 SQLx migration checksum。
 
-See [the fork README](./FORK_README.md) for installation, configuration, release
-artifacts, the related code locations, and the upstream merge checklist.
+## 安装便携版 CLI
 
-## Quickstart
+从本仓库的 GitHub Release 下载对应架构的文件：
 
-### Installing and running Codex CLI
-
-Run the following on Mac or Linux to install Codex CLI:
-
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+```text
+codex-portable-windows-x86_64-pc-windows-msvc.zip
+codex-portable-windows-aarch64-pc-windows-msvc.zip
 ```
 
-Run the following on Windows to install Codex CLI:
+安装步骤：
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+1. 将压缩包解压到固定目录，例如 `C:\Tools\codex`。
+2. 将包含 `codex.cmd` 的解压根目录加入 `PATH`，不要只加入 `bin` 目录。
+3. 打开一个新终端并运行：
+
+   ```powershell
+   codex --version
+   codex
+   ```
+
+`codex.cmd` 会先把便携包内的 Git for Windows 加入当前进程环境，再启动 `bin\codex.exe`。绕过 `codex.cmd` 直接运行可执行文件时，Codex 可能无法发现内置 Git Bash。
+
+## Codex App 便携包
+
+Release 还可能包含：
+
+```text
+codex-app-portable-windows-x86_64-pc-windows-msvc.zip
+codex-app-portable-windows-aarch64-pc-windows-msvc.zip
 ```
 
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
+解压后通过 `codex-app.cmd` 启动。该制品替换了上游 App 包中的部分 sidecar，因此不是可直接安装的 MSIX。
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
+## 使用前备份
+
+Codex 的用户配置和会话数据通常位于：
+
+```text
+%USERPROFILE%\.codex
 ```
+
+从上游版本或其他分支切换前，建议先备份：
 
 ```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
+Copy-Item "$env:USERPROFILE\.codex" "$env:USERPROFILE\.codex.backup" -Recurse
 ```
 
-Codex CLI can also be installed via the following package managers:
+## Windows shell 配置
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+配置文件通常为 `%USERPROFILE%\.codex\config.toml`。
+
+默认使用 Git Bash：
+
+```toml
+[windows]
+default_shell = "git-bash"
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+指定已有的 Git for Windows：
+
+```toml
+[windows]
+default_shell = "git-bash"
+git_bash_path = "C:\\Program Files\\Git\\bin\\bash.exe"
 ```
 
-Then simply run `codex` to get started.
+切换回原生 Windows shell：
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+```toml
+[windows]
+default_shell = "powershell"
+# default_shell = "cmd"
+```
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+`git_bash_path` 必须是有效 Git for Windows `bash.exe` 的绝对路径。显式选择 Git Bash 但路径无效时，Codex 会返回配置错误，不会静默使用其他 Bash 实现。
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+## 路径规则
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+当默认 shell 是 Git Bash 时，模型看到的 Windows 路径采用 Git Bash 形式：
 
-</details>
+```text
+C:\Users\Alice\project  ->  /c/Users/Alice/project
+```
 
-### Using Codex with your ChatGPT plan
+工具接收到结构化路径字段后，会在调用 Windows API 或原生 shell 前转换回 Windows 路径。`/usr/bin` 等 MSYS 路径不会被误判为磁盘路径。
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+`exec_command` 的显式 `shell` 参数只决定如何解释 `cmd`，不会改变本轮模型上下文的路径约定。例如默认 Git Bash 时，即使显式选择 `cmd.exe`，`workdir: "/d/work"` 仍会解析为 `D:\work`。
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+Git Bash 路径仍应用于命令和工具的结构化路径参数。Codex App 中需要点击打开的本地 Markdown 链接则使用 Windows 原生绝对路径和正斜杠，例如 `[FORK_README.md](D:/Workspace/codex/FORK_README.md)`；不要将 `/d/Workspace/codex/FORK_README.md` 用作链接目标。
 
-## Docs
+## 常见问题
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+### 找不到 Git Bash
 
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+- 确认 `PATH` 中加入的是包含 `codex.cmd` 的便携包根目录。
+- 确认通过 `codex.cmd` 启动，而不是直接运行 `bin\codex.exe`。
+- 使用系统安装的 Git for Windows 时，检查 `git_bash_path` 是否指向对应的 `bin\bash.exe`。
+
+### 中文乱码
+
+本版本会为 Git Bash 命令设置 `LANG`、`LC_CTYPE` 和 `LC_ALL=C.UTF-8`。如果乱码来自 `cmd.exe`、MSVC 或其他原生 Windows 程序，它们仍可能按照系统代码页输出，需要单独调整程序或终端编码。
+
+## 分支与上游同步
+
+- `main`：跟踪 `openai/codex:main`。
+- `codex/fork-release`：包含 Windows Git Bash 和便携发布相关二开功能。
+- 上游同步完成后，需要将 `main` 合并到 `codex/fork-release`，并复核二开功能没有因主线结构变化而退化。
+
+维护者可继续阅读：
+
+- [二开维护与合并手册](./FORK_README.md)
+- [2026-08-01 主线合并审查记录](./FORK_MERGE_REVIEW_2026-08-01.md)
+- [上游 Codex 文档](https://developers.openai.com/codex)
+- [许可证](./LICENSE)

@@ -82,6 +82,15 @@ async fn configured_git_bash_renders_environment_context_shell() -> anyhow::Resu
     test.submit_turn("hello").await?;
 
     let request = response_mock.single_request();
+    let developer_context = request.message_input_texts("developer");
+    assert!(
+        developer_context.iter().any(|text| {
+            text.starts_with("<git_bash_file_link_instructions>")
+                && text.contains("Markdown links to local files")
+                && text.contains("C:/...")
+        }),
+        "expected native Windows Markdown file-link guidance: {developer_context:?}"
+    );
     let environment_context = request
         .message_input_texts("user")
         .into_iter()
