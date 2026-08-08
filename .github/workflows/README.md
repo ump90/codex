@@ -23,6 +23,11 @@ release flow:
   an existing fork release. It reuses the release's portable CLI archives,
   downloads the latest official Codex App packages, rebuilds the App archives,
   and replaces their entries in `SHA256SUMS.txt`. It does not compile the CLI.
+- Windows Cargo builds use `setup-rusty-v8` to download and checksum-verify the
+  matching sandbox-enabled V8 archive and binding from the Codex release for
+  the resolved `v8` crate version. This is required for both x64 and ARM64
+  MSVC builds because upstream `rusty_v8` does not publish those sandboxed
+  Windows artifacts.
 - `sync-upstream.yml` merges upstream `openai/codex` changes into `main`.
 
 The upstream OpenAI CI, triage, signing, package publishing, and release

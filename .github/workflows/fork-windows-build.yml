@@ -68,6 +68,11 @@ jobs:
         with:
           target: ${{ inputs.target }}
 
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ inputs.target }}
+
       - name: Cargo build Windows binaries
         shell: pwsh
         run: |

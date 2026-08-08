@@ -30,6 +30,7 @@ need to preserve existing configuration and session data.
 | Shell-aware path conversion | Converts Windows paths such as `C:\work` to `/c/work` for Git Bash, and converts model/tool inputs back to native paths where Windows APIs require them. Covers cwd, workspace roots, permissions, tool workdirs, image paths, and tool responses. | `codex-rs/core/src/git_bash_paths.rs`, `codex-rs/utils/path-uri/src/git_bash.rs`, `codex-rs/core/src/context/environment_context.rs` |
 | Explicit shell switching | Treats the default model-visible shell as the source of structured path syntax. Selecting PowerShell or cmd for one `exec_command` changes command parsing without misreading a Git Bash-form `workdir`. | `codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs`, `codex-rs/core/src/tools/handlers/unified_exec_tests.rs` |
 | Codex App file links | Keeps Git Bash `/c/...` syntax for commands and tool arguments, but tells the model to emit native `C:/...` targets for clickable local Markdown links. | `codex-rs/core/src/context/git_bash_file_link_instructions.rs`, `codex-rs/core/src/session/world_state.rs`, `codex-rs/core/tests/suite/windows_git_bash.rs` |
+| Windows V8 release artifacts | Downloads and verifies the exact sandbox-enabled V8 archive and binding published by Codex before x64 or ARM64 MSVC Cargo builds. | `.github/actions/setup-rusty-v8/action.yml`, `.github/workflows/fork-windows-build.yml`, `.github/workflows/fork-release.yml` |
 | Git Bash `apply_patch` | Interprets add, update, delete, move, and optional `cd` paths using Git Bash semantics without misreading MSYS paths such as `/usr/bin`. | `codex-rs/apply-patch/src/invocation.rs`, `codex-rs/apply-patch/src/lib.rs`, `codex-rs/core/src/tools/handlers/apply_patch.rs` |
 | Windows sandbox integration | Makes the complete Git for Windows runtime available read-only inside the Windows sandbox instead of copying only `bash.exe`. | `codex-rs/sandboxing/src/manager.rs`, `codex-rs/windows-sandbox-rs/src/helper_materialization.rs` |
 | UTF-8 Git Bash commands | Sets `LANG`, `LC_CTYPE`, and `LC_ALL` to `C.UTF-8` for Git Bash commands to reduce localized Windows encoding problems. | `codex-rs/core/src/tools/handlers/shell/shell_command.rs` |
@@ -203,6 +204,8 @@ At minimum, confirm that:
 - Windows cwd and workspace roots render as `/c/...` for Git Bash;
 - local Markdown file links in a Git Bash session use native `C:/...` targets,
   so Codex App can open them on Windows;
+- Windows x64 and ARM64 release jobs download and verify Codex-published
+  sandbox-enabled `rusty_v8` artifacts before invoking Cargo;
 - shell workdirs, permission paths, `view_image`, and `apply_patch` convert in
   both directions without converting `/usr/...` as a drive path;
 - explicitly selecting PowerShell or cmd still resolves a Git Bash-form
