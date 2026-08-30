@@ -14,7 +14,10 @@ pub struct CommandToolOptions {
 #[cfg(test)]
 pub fn create_exec_command_tool(options: CommandToolOptions) -> ToolSpec {
     create_exec_command_tool_with_environment_id(
-        options, /*include_environment_id*/ false, /*include_shell_parameter*/ true,
+        options,
+        /*include_environment_id*/ false,
+        /*include_shell_parameter*/ true,
+        /*include_windows_shell_guidance*/ cfg!(windows),
     )
 }
 
@@ -22,6 +25,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     options: CommandToolOptions,
     include_environment_id: bool,
     include_shell_parameter: bool,
+    include_windows_shell_guidance: bool,
 ) -> ToolSpec {
     let yield_time_ms_description = if cfg!(windows) {
         "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
@@ -62,7 +66,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         properties.insert(
             "shell".to_string(),
             JsonSchema::string(Some(
-                "Shell binary to launch. Defaults to the user's default shell from <environment_context><shell>. On Windows, pass an absolute Git for Windows bash.exe path when explicitly selecting Git Bash.".to_string(),
+                "Shell binary to launch. Defaults to the user's default shell.".to_string(),
             )),
         );
     }
@@ -90,10 +94,15 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
 
     ToolSpec::Function(ResponsesApiTool {
         name: "exec_command".to_string(),
-        description: format!(
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
-            windows_shell_guidance()
-        ),
+        description: if include_windows_shell_guidance {
+            format!(
+                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
+                windows_shell_guidance()
+            )
+        } else {
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+                .to_string()
+        },
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
@@ -146,69 +155,6 @@ pub fn create_write_stdin_tool() -> ToolSpec {
             Some(false.into()),
         ),
         output_schema: Some(unified_exec_output_schema()),
-    })
-}
-
-pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
-    let mut properties = BTreeMap::from([
-        (
-            "command".to_string(),
-            JsonSchema::string(Some(
-                "Shell script to run in the user's default shell.".to_string(),
-            )),
-        ),
-        (
-            "workdir".to_string(),
-            JsonSchema::string(Some(
-                "Working directory for the command. Defaults to the turn cwd.".to_string(),
-            )),
-        ),
-        (
-            "timeout_ms".to_string(),
-            JsonSchema::number(Some(
-                "Maximum command runtime. Defaults to 10000 ms.".to_string(),
-            )),
-        ),
-    ]);
-    if options.allow_login_shell {
-        properties.insert(
-            "login".to_string(),
-            JsonSchema::boolean(Some(
-                "True runs with login shell semantics; false disables them. Defaults to true."
-                    .to_string(),
-            )),
-        );
-    }
-    properties.extend(create_approval_parameters(
-        options.exec_permission_approvals_enabled,
-    ));
-
-    let description = format!(
-        r#"Runs a command in the user's default shell and returns its output.
-
-Use the shell shown in <environment_context><shell>:
-
-- Git Bash/bash: "ls -la", "find . -name '*.py'", "rg TODO", "FOO=bar python - <<'PY'\nprint('Hello, world!')\nPY"
-- PowerShell: "Get-ChildItem -Force", "Get-ChildItem -Recurse -Filter *.py", "$env:FOO='bar'; echo $env:FOO"
-- cmd: "dir /a", "dir /s /b *.py", "set FOO=bar && echo %FOO%"
-
-Always set the `workdir` param when using the shell_command function. Do not use `cd` unless absolutely necessary.
-
-{}"#,
-        windows_shell_guidance()
-    );
-
-    ToolSpec::Function(ResponsesApiTool {
-        name: "shell_command".to_string(),
-        description,
-        strict: false,
-        defer_loading: None,
-        parameters: JsonSchema::object(
-            properties,
-            Some(vec!["command".to_string()]),
-            Some(false.into()),
-        ),
-        output_schema: None,
     })
 }
 
@@ -392,8 +338,7 @@ fn file_system_permissions_schema() -> JsonSchema {
 
 fn windows_shell_guidance() -> &'static str {
     r#"Windows safety rules:
-- When <environment_context><shell> is `bash` and its cwd uses a Windows drive path such as `/c/Users/name/project`, commands run in Git Bash. Use that path form or forward-slash Windows paths such as `C:/Users/name/project`; do not put raw backslash paths like `C:\Users\name` directly in Bash commands.
-- Do not compose destructive filesystem commands across shells. Do not enumerate paths in one shell and then pass them to PowerShell, `cmd /c`, batch builtins, Git Bash, or another shell for deletion or moving. Use one shell end-to-end, prefer that shell's literal-path facilities, and avoid string-built shell commands for file operations.
+- Do not compose destructive filesystem commands across shells. Do not enumerate paths in PowerShell and then pass them to `cmd /c`, batch builtins, or another shell for deletion or moving. Use one shell end-to-end, prefer native PowerShell cmdlets such as `Remove-Item` / `Move-Item` with `-LiteralPath`, and avoid string-built shell commands for file operations.
 - Before any recursive delete or move on Windows, verify the resolved absolute target paths stay within the intended workspace or explicitly named target directory. Never issue a recursive delete or move against a computed path if the final target has not been checked.
 - When using `Start-Process` to launch a background helper or service, pass `-WindowStyle Hidden` unless the user explicitly asked for a visible interactive window. Use visible windows only for interactive tools the user needs to see or control."#
 }

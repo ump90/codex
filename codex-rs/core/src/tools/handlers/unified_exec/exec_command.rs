@@ -1,9 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+use crate::exec_policy::prompt_is_rejected_by_policy;
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
-use crate::shell::Shell;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -12,13 +14,13 @@ use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::handlers::apply_patch::intercept_apply_patch;
 use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
-use crate::tools::handlers::normalize_git_bash_path_arguments_for_shell;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_sandbox_permissions;
 use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::handlers::rewrite_function_string_argument;
 use crate::tools::handlers::updated_hook_command;
+use crate::tools::handlers::normalize_git_bash_path_arguments_for_shell;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
@@ -36,6 +38,7 @@ use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
 use codex_shell_command::shell_detect::detect_shell_type;
+use codex_tools::JsonSchema;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
@@ -50,26 +53,44 @@ use super::get_command;
 use super::post_unified_exec_tool_use_payload;
 use super::shell_mode_for_environment;
 
+pub(super) fn normalize_exec_command_git_bash_path_arguments(
+    arguments: String,
+    default_shell: &crate::shell::Shell,
+    cwd: &PathUri,
+) -> Result<String, FunctionCallError> {
+    normalize_git_bash_path_arguments_for_shell(arguments, Some(default_shell.name()), cwd)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) allow_login_shell: bool,
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
     pub(crate) include_shell_parameter: bool,
+    pub(crate) include_windows_shell_guidance: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ExecCommandLifetime {
+    Interactive,
+    OneShot,
 }
 
 pub struct ExecCommandHandler {
     options: ExecCommandHandlerOptions,
+    lifetime: ExecCommandLifetime,
 }
 
 impl Default for ExecCommandHandler {
     fn default() -> Self {
         Self {
+            lifetime: ExecCommandLifetime::Interactive,
             options: ExecCommandHandlerOptions {
                 allow_login_shell: false,
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
                 include_shell_parameter: true,
+                include_windows_shell_guidance: cfg!(windows),
             },
         }
     }
@@ -77,18 +98,18 @@ impl Default for ExecCommandHandler {
 
 impl ExecCommandHandler {
     pub(crate) fn new(options: ExecCommandHandlerOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            lifetime: ExecCommandLifetime::Interactive,
+        }
     }
-}
 
-pub(super) fn normalize_exec_command_git_bash_path_arguments(
-    arguments: String,
-    default_shell: &Shell,
-    cwd: &PathUri,
-) -> Result<String, FunctionCallError> {
-    // Tool paths use the convention shown in the environment context. An explicit execution
-    // shell changes command syntax, not the path convention the model was given.
-    normalize_git_bash_path_arguments_for_shell(arguments, Some(default_shell.name()), cwd)
+    pub(crate) fn one_shot(options: ExecCommandHandlerOptions) -> Self {
+        Self {
+            options,
+            lifetime: ExecCommandLifetime::OneShot,
+        }
+    }
 }
 
 impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
@@ -97,21 +118,29 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_exec_command_tool_with_environment_id(
+        let spec = create_exec_command_tool_with_environment_id(
             CommandToolOptions {
                 allow_login_shell: self.options.allow_login_shell,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
             },
             self.options.include_environment_id,
             self.options.include_shell_parameter,
-        )
+            self.options.include_windows_shell_guidance,
+        );
+        match self.lifetime {
+            ExecCommandLifetime::Interactive => spec,
+            ExecCommandLifetime::OneShot => one_shot_exec_command_spec(spec),
+        }
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -125,6 +154,7 @@ impl ExecCommandHandler {
             session,
             turn,
             step_context,
+            cancellation_token,
             tracker,
             call_id,
             payload,
@@ -141,7 +171,12 @@ impl ExecCommandHandler {
         };
 
         let manager: &UnifiedExecProcessManager = &session.services.unified_exec_manager;
-        let context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
+        let context = UnifiedExecContext::new(
+            session.clone(),
+            step_context.clone(),
+            cancellation_token,
+            call_id.clone(),
+        );
         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
         let Some(turn_environment) = resolve_tool_environment(
             &step_context.environments,
@@ -152,19 +187,9 @@ impl ExecCommandHandler {
                 "unified exec is unavailable in this session".to_string(),
             ));
         };
-        // Remote environments may use a different OS and must build commands with their native
-        // shell; fall back to the session shell when the environment did not report one.
-        let shell = turn_environment
-            .shell
-            .clone()
-            .map(Arc::new)
-            .unwrap_or_else(|| session.user_shell());
-        let environment = Arc::clone(&turn_environment.environment);
-        let shell_mode =
-            shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
         let arguments = normalize_exec_command_git_bash_path_arguments(
             arguments,
-            shell.as_ref(),
+            session.user_shell().as_ref(),
             turn_environment.cwd(),
         )?;
         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
@@ -178,6 +203,7 @@ impl ExecCommandHandler {
                 |workdir| native_environment_cwd.join(workdir),
             )
             .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
+        let environment = Arc::clone(&turn_environment.environment);
         let fs = environment.get_filesystem();
 
         // Remote executors enforce URI-native sandbox policy themselves. Only a host-local
@@ -186,7 +212,7 @@ impl ExecCommandHandler {
             && SandboxManager::new().select_initial(
                 turn_environment.permission_profile(),
                 SandboxablePreference::Auto,
-                turn.windows_sandbox_level,
+                turn_environment.config().windows_sandbox_level,
                 turn.network.is_some(),
             ) != SandboxType::None;
         // `to_abs_path()` alone cannot identify foreign drive paths: `file:///C:/repo` is
@@ -218,16 +244,24 @@ impl ExecCommandHandler {
         let sandbox_permissions =
             resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
         let hook_command = args.cmd.clone();
-        // TODO(anp) wire PathUri through implicit skills instead of skipping on foreign paths
-        if let Some(native_cwd) = native_cwd.as_ref() {
-            maybe_emit_implicit_skill_invocation(
-                session.as_ref(),
-                context.turn.as_ref(),
-                &hook_command,
-                native_cwd,
-            )
-            .await;
-        }
+        maybe_emit_implicit_skill_invocation(
+            session.as_ref(),
+            context.step_context.turn.as_ref(),
+            &hook_command,
+            &cwd,
+            native_cwd.as_ref(),
+            &turn_environment.selection.environment_id,
+        )
+        .await;
+        let shell_mode =
+            shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
+        // Remote environments may use a different OS and must build commands with their native
+        // shell; fall back to the session shell when the environment did not report one.
+        let shell = turn_environment
+            .shell
+            .clone()
+            .map(Arc::new)
+            .unwrap_or_else(|| session.user_shell());
         // TODO(anp): Resolve requested shells in remote environments instead of restricting
         // commands to the reported default shell.
         if environment.is_remote()
@@ -236,13 +270,13 @@ impl ExecCommandHandler {
             let Some(remote_shell) = turn_environment.shell.as_ref() else {
                 return Err(FunctionCallError::RespondToModel(format!(
                     "environment `{}` does not report a shell",
-                    turn_environment.environment_id
+                    turn_environment.selection.environment_id
                 )));
             };
             if detect_shell_type(Path::new(&requested_shell)) != Some(remote_shell.shell_type) {
                 return Err(FunctionCallError::RespondToModel(format!(
                     "environment `{}` only supports `{}`",
-                    turn_environment.environment_id,
+                    turn_environment.selection.environment_id,
                     remote_shell.name()
                 )));
             }
@@ -252,33 +286,17 @@ impl ExecCommandHandler {
             &args,
             shell,
             &shell_mode,
-            turn_environment.config.allow_login_shell,
+            turn_environment.config().allow_login_shell,
         )
         .map_err(FunctionCallError::RespondToModel)?;
         let command = resolved_command.command;
-        if environment.is_remote()
-            && !cwd_uses_native_convention
-            && !turn_environment
-                .permission_profile()
-                .file_system_sandbox_policy()
-                .has_full_disk_write_access()
-            && matches!(
-                codex_apply_patch::maybe_parse_apply_patch(&command, &cwd),
-                codex_apply_patch::MaybeApplyPatch::Body(_)
-            )
-        {
-            // CA-781: patch verification reads executor files before process sandboxing applies.
-            manager.release_process_id(process_id).await;
-            return Err(FunctionCallError::RespondToModel(
-                "cross-platform remote apply_patch is unavailable until executor-side filesystem sandboxing is supported".to_string(),
-            ));
-        }
         let shell_type = resolved_command.shell_type;
         let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
 
         let ExecCommandArgs {
-            tty,
+            mut tty,
             yield_time_ms,
+            timeout_ms,
             max_output_tokens,
             sandbox_permissions: _,
             additional_permissions,
@@ -286,6 +304,15 @@ impl ExecCommandHandler {
             prefix_rule,
             ..
         } = args;
+        let completion_timeout = match self.lifetime {
+            ExecCommandLifetime::Interactive => None,
+            ExecCommandLifetime::OneShot => {
+                tty = false;
+                Some(Duration::from_millis(
+                    timeout_ms.unwrap_or(DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
+                ))
+            }
+        };
 
         let exec_permission_approvals_enabled =
             session.features().enabled(Feature::ExecPermissionApprovals);
@@ -294,7 +321,7 @@ impl ExecCommandHandler {
         let permission_cwd = native_cwd.as_ref().unwrap_or(&turn.config.cwd);
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
-            &turn_environment.environment_id,
+            &turn_environment.selection.environment_id,
             permission_cwd.as_path(),
             sandbox_permissions,
             additional_permissions,
@@ -306,16 +333,13 @@ impl ExecCommandHandler {
 
         // Sticky turn permissions have already been approved, so they should
         // continue through the normal exec approval flow for the command.
+        let approval_policy = context.step_context.settings.approval_policy();
         if effective_additional_permissions
             .sandbox_permissions
             .requests_sandbox_override()
             && !effective_additional_permissions.permissions_preapproved
-            && !matches!(
-                context.turn.approval_policy(),
-                codex_protocol::protocol::AskForApproval::OnRequest
-            )
+            && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
         {
-            let approval_policy = context.turn.approval_policy();
             manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
@@ -331,7 +355,7 @@ impl ExecCommandHandler {
             || {
                 normalize_and_validate_additional_permissions(
                     additional_permissions_allowed,
-                    context.turn.approval_policy(),
+                    approval_policy,
                     effective_additional_permissions.sandbox_permissions,
                     effective_additional_permissions.additional_permissions,
                     effective_additional_permissions.permissions_preapproved,
@@ -347,26 +371,32 @@ impl ExecCommandHandler {
             }
         };
 
-        if let Some(output) = intercept_apply_patch(
+        let intercepted_patch = intercept_apply_patch(
             &command,
             &cwd,
             fs.as_ref(),
             turn_environment.clone(),
             context.session.clone(),
-            context.turn.clone(),
+            Arc::clone(&context.step_context),
+            context.cancellation_token.clone(),
             Some(&tracker),
             &context.call_id,
             "exec_command",
         )
-        .await?
-        {
+        .await;
+        // Keep the reservation when interception returns `Ok(None)`: the normal command below
+        // still needs this process ID.
+        if intercepted_patch.is_err() {
+            manager.release_process_id(process_id).await;
+        }
+        if let Some(output) = intercepted_patch? {
             manager.release_process_id(process_id).await;
             return Ok(boxed_tool_output(ExecCommandToolOutput {
                 event_call_id: String::new(),
                 chunk_id: String::new(),
                 wall_time: std::time::Duration::ZERO,
                 raw_output: output.into_text().into_bytes(),
-                truncation_policy: turn.model_info.truncation_policy.into(),
+                truncation_policy: turn.model_info().truncation_policy.into(),
                 max_output_tokens,
                 process_id: None,
                 exit_code: None,
@@ -377,32 +407,34 @@ impl ExecCommandHandler {
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
-        match manager
-            .exec_command(
-                ExecCommandRequest {
-                    command,
-                    shell_type,
-                    hook_command: hook_command.clone(),
-                    process_id,
-                    yield_time_ms,
-                    max_output_tokens,
-                    cwd,
-                    sandbox_cwd: native_environment_cwd,
-                    turn_environment: turn_environment.clone(),
-                    shell_mode,
-                    network: context.turn.network.clone(),
-                    tty,
-                    sandbox_permissions: effective_additional_permissions.sandbox_permissions,
-                    additional_permissions: normalized_additional_permissions,
-                    additional_permissions_preapproved: effective_additional_permissions
-                        .permissions_preapproved,
-                    justification,
-                    prefix_rule,
-                },
-                &context,
-            )
-            .await
-        {
+        let request = ExecCommandRequest {
+            command,
+            shell_type,
+            hook_command: hook_command.clone(),
+            process_id,
+            yield_time_ms,
+            max_output_tokens,
+            cwd,
+            sandbox_cwd: native_environment_cwd,
+            turn_environment: turn_environment.clone(),
+            shell_mode,
+            network: context.step_context.turn.network.clone(),
+            tty,
+            sandbox_permissions: effective_additional_permissions.sandbox_permissions,
+            additional_permissions: normalized_additional_permissions,
+            additional_permissions_preapproved: effective_additional_permissions
+                .permissions_preapproved,
+            justification,
+            prefix_rule,
+        };
+        let result = match completion_timeout {
+            Some(timeout) => {
+                UnifiedExecProcessManager::exec_command_to_completion(request, &context, timeout)
+                    .await
+            }
+            None => manager.exec_command(request, &context).await,
+        };
+        match result {
             Ok(response) => Ok(boxed_tool_output(response)),
             Err(UnifiedExecError::SandboxDenied {
                 output,
@@ -418,7 +450,7 @@ impl ExecCommandHandler {
                     chunk_id: generate_chunk_id(),
                     wall_time: output.duration,
                     raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.model_info.truncation_policy.into(),
+                    truncation_policy: turn.model_info().truncation_policy.into(),
                     max_output_tokens,
                     // Sandbox denial is terminal, so there is no live
                     // process for write_stdin to resume.
@@ -434,6 +466,35 @@ impl ExecCommandHandler {
             ))),
         }
     }
+}
+
+fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
+    let ToolSpec::Function(mut spec) = spec else {
+        unreachable!("exec_command has a function schema");
+    };
+    spec.description = spec.description.replacen(
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+        "Runs a command to completion and returns its output. The process is terminated on timeout or cancellation and cannot be resumed.",
+        1,
+    );
+    let properties = spec.parameters.properties.get_or_insert_default();
+    properties.remove("tty");
+    properties.remove("yield_time_ms");
+    properties.insert(
+        "timeout_ms".to_string(),
+        JsonSchema::number(Some(
+            "Maximum command runtime. Defaults to 10000 ms.".to_string(),
+        )),
+    );
+    if let Some(output_properties) = spec
+        .output_schema
+        .as_mut()
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        output_properties.remove("session_id");
+    }
+    ToolSpec::Function(spec)
 }
 
 impl CoreToolRuntime for ExecCommandHandler {

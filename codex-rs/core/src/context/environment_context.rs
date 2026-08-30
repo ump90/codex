@@ -1,3 +1,6 @@
+use crate::git_bash_paths::PathDisplayStyle;
+use crate::git_bash_paths::format_path_text_for_shell;
+use crate::git_bash_paths::format_path_uri_for_shell;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -6,11 +9,6 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_utils_path_uri::PathUri;
 use std::collections::HashSet;
-
-use crate::git_bash_paths::PathDisplayStyle;
-use crate::git_bash_paths::format_native_path_for_shell;
-use crate::git_bash_paths::format_path_text_for_shell;
-use crate::git_bash_paths::format_path_uri_for_shell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSystemContext {
@@ -41,13 +39,9 @@ impl FileSystemContext {
         workspace_roots: &[PathUri],
         path_display_style: PathDisplayStyle,
     ) -> Self {
-        let materialized_workspace_roots = workspace_roots
-            .iter()
-            .filter_map(|workspace_root| workspace_root.to_abs_path().ok())
-            .collect::<Vec<_>>();
         let permission_profile = permission_profile
             .clone()
-            .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
+            .materialize_project_roots_with_path_uris(workspace_roots);
         let workspace_roots = workspace_roots
             .iter()
             .map(|root| format_path_uri_for_shell(root, path_display_style))
@@ -167,7 +161,8 @@ fn render_file_system_entry(
     rendered.push_str("\">");
     match &entry.path {
         FileSystemPath::Path { path } => {
-            let path = format_native_path_for_shell(path.as_path(), path_display_style);
+            let native_path = path.inferred_native_path_string();
+            let path = format_path_text_for_shell(&native_path, path_display_style);
             push_text_element(rendered, "path", &path);
         }
         FileSystemPath::GlobPattern { pattern } => {

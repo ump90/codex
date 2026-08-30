@@ -1,8 +1,13 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItemKind;
 
 pub(crate) struct GitBashFileLinkInstructions;
 
 impl ContextualUserFragment for GitBashFileLinkInstructions {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("git_bash_file_link_instructions".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }

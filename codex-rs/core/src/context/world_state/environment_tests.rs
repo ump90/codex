@@ -1,6 +1,7 @@
 use super::super::PreviousSectionState;
 use super::super::test_support::render_section_cases;
 use super::*;
+use crate::git_bash_paths::PathDisplayStyle;
 use anyhow::Result;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::models::PermissionProfile;
@@ -197,7 +198,8 @@ fn changing_primary_environment_updates_model_context_and_persisted_state() -> R
     assert_eq!(
         current_world_state
             .snapshot()
-            .merge_patch_from(&previous_world_state.snapshot()),
+            .merge_patch_from(&previous_world_state.snapshot())
+            .map(serde_json::Value::Object),
         Some(json!({
             "environments": {
                 "environments": {

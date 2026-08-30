@@ -78,22 +78,17 @@ impl Shell {
     }
 }
 
+#[cfg(all(test, unix))]
 fn ultimate_fallback_shell() -> Shell {
     codex_shell_command::shell_detect::ultimate_fallback_shell().into()
 }
 
-pub fn get_shell_by_model_provided_path(shell_path: &PathBuf) -> anyhow::Result<Shell> {
-    codex_shell_command::shell_detect::get_shell_by_model_provided_path(shell_path)
-        .map(Into::into)
-        .map_err(|err| anyhow::anyhow!("{err}"))
+pub fn get_shell_by_model_provided_path(shell_path: &PathBuf) -> Shell {
+    codex_shell_command::shell_detect::get_shell_by_model_provided_path(shell_path).into()
 }
 
-pub fn get_shell(shell_type: ShellType, path: Option<&PathBuf>) -> Option<Shell> {
-    codex_shell_command::shell_detect::get_shell(shell_type, path).map(Into::into)
-}
-
-pub fn default_user_shell() -> Shell {
-    codex_shell_command::shell_detect::default_user_shell().into()
+pub fn get_shell(shell_type: ShellType) -> Option<Shell> {
+    codex_shell_command::shell_detect::get_shell(shell_type).map(Into::into)
 }
 
 pub fn default_user_shell_for_windows_config(
@@ -120,13 +115,20 @@ pub fn default_user_shell_for_windows_config(
         .map(|git_bash| git_bash.shell.into())
         .map_err(|err| anyhow::anyhow!("{err}")),
         (None, None) | (Some(WindowsDefaultShellToml::PowerShell), _) => {
-            Ok(get_shell(ShellType::PowerShell, /*path*/ None)
-                .unwrap_or_else(ultimate_fallback_shell))
+            Ok(get_shell(ShellType::PowerShell).unwrap_or_else(|| {
+                codex_shell_command::shell_detect::ultimate_fallback_shell().into()
+            }))
         }
         (Some(WindowsDefaultShellToml::Cmd), _) => {
-            Ok(get_shell(ShellType::Cmd, /*path*/ None).unwrap_or_else(ultimate_fallback_shell))
+            Ok(get_shell(ShellType::Cmd).unwrap_or_else(|| {
+                codex_shell_command::shell_detect::ultimate_fallback_shell().into()
+            }))
         }
     }
+}
+
+pub fn default_user_shell() -> Shell {
+    codex_shell_command::shell_detect::default_user_shell().into()
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -138,8 +140,3 @@ fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
 #[cfg(unix)]
 #[path = "shell_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[cfg(windows)]
-#[path = "shell_windows_tests.rs"]
-mod windows_tests;

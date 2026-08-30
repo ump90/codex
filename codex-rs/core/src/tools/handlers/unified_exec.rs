@@ -36,6 +36,8 @@ pub(crate) struct ExecCommandArgs {
     #[serde(default = "default_exec_yield_time_ms")]
     yield_time_ms: u64,
     #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
     max_output_tokens: Option<usize>,
     #[serde(default)]
     sandbox_permissions: Option<SandboxPermissions>,
@@ -115,9 +117,7 @@ pub(crate) fn get_command(
             let model_shell = args
                 .shell
                 .as_ref()
-                .map(|shell_str| get_shell_by_model_provided_path(&PathBuf::from(shell_str)))
-                .transpose()
-                .map_err(|err| err.to_string())?;
+                .map(|shell_str| get_shell_by_model_provided_path(&PathBuf::from(shell_str)));
             let shell = model_shell.as_ref().unwrap_or(session_shell.as_ref());
             Ok(ResolvedCommand {
                 command: shell.derive_exec_args(&args.cmd, use_login_shell),

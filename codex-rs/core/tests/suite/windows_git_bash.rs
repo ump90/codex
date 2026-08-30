@@ -176,7 +176,6 @@ async fn configured_git_bash_resolves_workdir_when_switching_to_cmd() -> anyhow:
             std::fs::write(home.join("config.toml"), config).expect("write config.toml");
         })
         .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
             config
                 .features
                 .enable(Feature::UnifiedExec)

@@ -25,6 +25,7 @@ use url::Url;
 mod absolute_path_normalization;
 mod api_path_string;
 mod git_bash;
+mod native_path_bytes;
 
 use absolute_path_normalization::path_uri_from_segments;
 
@@ -173,6 +174,11 @@ impl PathUri {
     /// `file://server/share/file.rs` has the path `/share/file.rs`.
     pub fn encoded_path(&self) -> &str {
         self.0.path()
+    }
+
+    /// Returns the percent-decoded URI path without requiring valid UTF-8.
+    pub fn decoded_path_bytes(&self) -> Cow<'_, [u8]> {
+        urlencoding::decode_binary(self.encoded_path().as_bytes())
     }
 
     fn windows_identity_path_bytes(&self) -> Option<Cow<'_, [u8]>> {
@@ -336,6 +342,30 @@ impl PathUri {
         native_path_segments_start_with(&path_segments, &base_segments, convention)
     }
 
+    /// Returns whether the lexical subtrees rooted at these URIs overlap.
+    pub fn overlaps(&self, other: &Self) -> Option<bool> {
+        if self == other {
+            return Some(true);
+        }
+        self.lexical_depth()?;
+        other.lexical_depth()?;
+        Some(self.starts_with(other) || other.starts_with(self))
+    }
+
+    /// Returns true for a fallback URI that losslessly stores native path bytes.
+    pub fn is_opaque(&self) -> bool {
+        self.opaque_fallback_bytes().is_some()
+    }
+
+    /// Returns the number of non-empty path segments when this URI is safe for lexical containment.
+    pub fn lexical_depth(&self) -> Option<usize> {
+        if decode_bad_path_uri(&self.0).is_some() {
+            return None;
+        }
+        let convention = self.infer_path_convention()?;
+        containment_path_segments(&self.0, convention).map(|segments| segments.len())
+    }
+
     /// Returns the decoded relative path from `base` to this URI.
     ///
     /// The result uses the separators of the inferred path convention,
@@ -479,6 +509,25 @@ impl PathUri {
             }
         }
         Self::try_from(url)
+    }
+
+    /// Lexically resolves a relative native path that remains at or below this URI.
+    pub fn join_descendant(&self, path: &str) -> Result<Self, PathUriParseError> {
+        let descendant = self.join(path)?;
+        let windows = self.infer_path_convention() == Some(PathConvention::Windows);
+        if path.starts_with('/')
+            || windows
+                && (path.starts_with('\\')
+                    || PathConvention::Windows
+                        .path_segments(path)
+                        .any(|segment| segment.contains(':')))
+            || !descendant.starts_with(self)
+        {
+            return Err(PathUriParseError::JoinPathMustBeDescendant(
+                path.to_string(),
+            ));
+        }
+        Ok(descendant)
     }
 
     /// Converts this file URI to a path using the current host's path rules.
@@ -884,6 +933,8 @@ pub enum PathUriParseError {
     FragmentNotAllowed,
     #[error("path `{0}` must be relative when joining a path URI")]
     JoinPathMustBeRelative(String),
+    #[error("path `{0}` must resolve to a relative descendant when joining a path URI")]
+    JoinPathMustBeDescendant(String),
 }
 
 /// Path syntax used to render a [`PathUri`] as an operating-system path.
