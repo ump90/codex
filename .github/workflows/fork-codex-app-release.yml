@@ -14,6 +14,7 @@ on:
         type: string
 
 env:
+  CODEX_APP_CHECKSUMS_URL: "https://codexapp.agentsmirror.com/latest/checksums"
   CODEX_APP_MANIFEST_URL: "https://codexapp.agentsmirror.com/latest/manifest"
   CODEX_APP_WINDOWS_ARM64_URL: "https://codexapp.agentsmirror.com/latest/win-arm64"
   CODEX_APP_WINDOWS_X64_URL: "https://codexapp.agentsmirror.com/latest/win-x64"
@@ -33,12 +34,6 @@ jobs:
       ref_sha: ${{ steps.release_metadata.outputs.ref_sha }}
       release_tag: ${{ steps.release_metadata.outputs.release_tag }}
       cli_source_sha: ${{ steps.release_metadata.outputs.cli_source_sha }}
-      codex_app_x64_version: ${{ steps.codex_app_metadata.outputs.x64_app_version }}
-      codex_app_x64_package_version: ${{ steps.codex_app_metadata.outputs.x64_package_version }}
-      codex_app_x64_sha256_base64: ${{ steps.codex_app_metadata.outputs.x64_sha256_base64 }}
-      codex_app_arm64_version: ${{ steps.codex_app_metadata.outputs.arm64_app_version }}
-      codex_app_arm64_package_version: ${{ steps.codex_app_metadata.outputs.arm64_package_version }}
-      codex_app_arm64_sha256_base64: ${{ steps.codex_app_metadata.outputs.arm64_sha256_base64 }}
       codex_app_matrix: ${{ steps.codex_app_metadata.outputs.matrix }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -91,20 +86,10 @@ jobs:
             "${CODEX_APP_MANIFEST_URL}"
 
           x64_downloadable="$(jq -r '.sources.windows.architectures.x64.downloadable // false' "${manifest_path}")"
-          x64_app_version="$(jq -r '.sources.windows.architectures.x64.appVersion // empty' "${manifest_path}")"
-          x64_package_version="$(jq -r '.sources.windows.architectures.x64.version // empty' "${manifest_path}")"
-          x64_sha256_base64="$(jq -r '.sources.windows.architectures.x64.catalog.hash // empty' "${manifest_path}")"
           arm64_downloadable="$(jq -r '.sources.windows.architectures.arm64.downloadable // false' "${manifest_path}")"
-          arm64_app_version="$(jq -r '.sources.windows.architectures.arm64.appVersion // empty' "${manifest_path}")"
-          arm64_package_version="$(jq -r '.sources.windows.architectures.arm64.version // empty' "${manifest_path}")"
-          arm64_sha256_base64="$(jq -r '.sources.windows.architectures.arm64.catalog.hash // empty' "${manifest_path}")"
 
-          if [[ "${x64_downloadable}" != "true" || -z "${x64_app_version}" || -z "${x64_package_version}" || -z "${x64_sha256_base64}" ]]; then
-            echo "The latest Codex App manifest does not contain complete Windows x64 package metadata." >&2
-            exit 1
-          fi
-          if [[ "${arm64_downloadable}" == "true" && ( -z "${arm64_app_version}" || -z "${arm64_package_version}" || -z "${arm64_sha256_base64}" ) ]]; then
-            echo "The latest Codex App manifest marks Windows ARM64 downloadable but does not provide complete package metadata." >&2
+          if [[ "${x64_downloadable}" != "true" ]]; then
+            echo "The latest Codex App manifest does not mark Windows x64 as downloadable." >&2
             exit 1
           fi
 
@@ -126,12 +111,6 @@ jobs:
           fi
 
           {
-            echo "x64_app_version=${x64_app_version}"
-            echo "x64_package_version=${x64_package_version}"
-            echo "x64_sha256_base64=${x64_sha256_base64}"
-            echo "arm64_app_version=${arm64_app_version}"
-            echo "arm64_package_version=${arm64_package_version}"
-            echo "arm64_sha256_base64=${arm64_sha256_base64}"
             echo "matrix=${matrix}"
           } >> "$GITHUB_OUTPUT"
 
@@ -196,14 +175,8 @@ jobs:
 
           if ($target -eq "x86_64-pc-windows-msvc") {
             $sourceUrl = $env:CODEX_APP_WINDOWS_X64_URL
-            $expectedSha256Base64 = "${{ needs.metadata.outputs.codex_app_x64_sha256_base64 }}"
-            $baseAppVersion = "${{ needs.metadata.outputs.codex_app_x64_version }}"
-            $basePackageVersion = "${{ needs.metadata.outputs.codex_app_x64_package_version }}"
           } elseif ($target -eq "aarch64-pc-windows-msvc") {
             $sourceUrl = $env:CODEX_APP_WINDOWS_ARM64_URL
-            $expectedSha256Base64 = "${{ needs.metadata.outputs.codex_app_arm64_sha256_base64 }}"
-            $baseAppVersion = "${{ needs.metadata.outputs.codex_app_arm64_version }}"
-            $basePackageVersion = "${{ needs.metadata.outputs.codex_app_arm64_package_version }}"
           } else {
             throw "Unsupported Codex App target: $target"
           }
@@ -213,9 +186,8 @@ jobs:
             -CodexPackageDir $cliPortablePackageDir `
             -DistRoot (Join-Path -Path (Get-Location) -ChildPath "dist") `
             -SourceUrl $sourceUrl `
-            -ExpectedSha256Base64 $expectedSha256Base64 `
-            -BaseAppVersion $baseAppVersion `
-            -BasePackageVersion $basePackageVersion `
+            -ManifestUrl $env:CODEX_APP_MANIFEST_URL `
+            -ChecksumsUrl $env:CODEX_APP_CHECKSUMS_URL `
             -ForkReleaseTag "${{ needs.metadata.outputs.release_tag }}" `
             -SourceRef "${{ needs.metadata.outputs.cli_source_sha }}"
 
@@ -286,6 +258,6 @@ jobs:
             echo "### Codex App assets updated"
             echo
             echo "- Release: \`${RELEASE_TAG}\`"
-            echo "- App version: \`${{ needs.metadata.outputs.codex_app_x64_version }}\`"
+            echo "- App version: recorded in each archive's \`CODEX-APP-BUILD-INFO.json\`"
             printf -- '- Asset: `%s`\n' "${app_assets[@]##*/}"
           } >> "$GITHUB_STEP_SUMMARY"

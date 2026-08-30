@@ -119,6 +119,10 @@ Fork workflows:
   Rust CLI;
 - `sync-upstream.yml`: synchronizes upstream into the fork's `main` branch.
 
+The App workflows resolve the target architecture's current manifest entry and
+the matching MSIX checksum immediately before downloading. This keeps the
+rolling `latest` links usable while still verifying the downloaded package.
+
 Fork release tags must not use upstream's `rust-v*` namespace. Use a tag such
 as `<upstream-version>-fork.1` or `<upstream-version>-gitbash.1`.
 

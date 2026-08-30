@@ -12,13 +12,10 @@ param(
     [string]$SourceUrl,
 
     [Parameter(Mandatory = $true)]
-    [string]$ExpectedSha256Base64,
+    [string]$ManifestUrl,
 
     [Parameter(Mandatory = $true)]
-    [string]$BaseAppVersion,
-
-    [Parameter(Mandatory = $true)]
-    [string]$BasePackageVersion,
+    [string]$ChecksumsUrl,
 
     [Parameter(Mandatory = $true)]
     [string]$ForkReleaseTag,
@@ -66,6 +63,65 @@ function Reset-ChildDirectory {
     New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
 }
 
+function Get-RemoteText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
+
+    $content = & curl.exe --fail --location --retry 3 --retry-all-errors --silent --show-error $Url
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to download $Url"
+    }
+    $content -join "`n"
+}
+
+function Resolve-CodexAppMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Architecture,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestUrl,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ChecksumsUrl
+    )
+
+    $manifest = (Get-RemoteText -Url $ManifestUrl) | ConvertFrom-Json
+    $package = $manifest.sources.windows.architectures.$Architecture
+    if (-not $package -or -not $package.downloadable) {
+        throw "Codex App manifest does not mark Windows $Architecture as downloadable"
+    }
+
+    $appVersion = [string]$package.appVersion
+    $packageVersion = [string]$package.version
+    $packageMoniker = [string]$package.packageMoniker
+    if ([string]::IsNullOrWhiteSpace($appVersion) -or [string]::IsNullOrWhiteSpace($packageVersion) -or [string]::IsNullOrWhiteSpace($packageMoniker)) {
+        throw "Codex App manifest does not provide complete Windows $Architecture package metadata"
+    }
+
+    $checksumName = "$packageMoniker.Msix"
+    $checksumMatches = @(
+        (Get-RemoteText -Url $ChecksumsUrl) -split "`r?`n" |
+            ForEach-Object {
+                if ($_ -match '^(?<hash>[0-9A-Fa-f]{64})  (?<name>.+)$' -and $Matches.name -ceq $checksumName) {
+                    $Matches.hash.ToLowerInvariant()
+                }
+            }
+    )
+    if ($checksumMatches.Count -ne 1) {
+        throw "Expected one SHA-256 checksum for $checksumName in $ChecksumsUrl, found $($checksumMatches.Count)"
+    }
+
+    [pscustomobject]@{
+        AppVersion = $appVersion
+        PackageVersion = $packageVersion
+        PackageMoniker = $packageMoniker
+        Sha256 = $checksumMatches[0]
+    }
+}
+
 $appArchitecture = switch ($Target) {
     "x86_64-pc-windows-msvc" { "x64"; break }
     "aarch64-pc-windows-msvc" { "arm64"; break }
@@ -83,18 +139,30 @@ Reset-ChildDirectory -Path $downloadDir -Root $env:RUNNER_TEMP
 Reset-ChildDirectory -Path $extractDir -Root $env:RUNNER_TEMP
 Reset-ChildDirectory -Path $packageDir -Root $DistRoot
 
-Write-Host "Downloading Codex App $BaseAppVersion for $appArchitecture"
-& curl.exe --fail --location --retry 3 --retry-all-errors --output $msixPath $SourceUrl
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to download Codex App from $SourceUrl"
-}
+$codexAppMetadata = $null
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    $codexAppMetadata = Resolve-CodexAppMetadata `
+        -Architecture $appArchitecture `
+        -ManifestUrl $ManifestUrl `
+        -ChecksumsUrl $ChecksumsUrl
 
-$expectedSha256 = [Convert]::ToHexString(
-    [Convert]::FromBase64String($ExpectedSha256Base64)
-).ToLowerInvariant()
-$actualSha256 = (Get-FileHash -LiteralPath $msixPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actualSha256 -ne $expectedSha256) {
-    throw "Codex App MSIX SHA-256 mismatch. Expected $expectedSha256, got $actualSha256"
+    Write-Host "Downloading Codex App $($codexAppMetadata.AppVersion) for $appArchitecture (attempt $attempt of 3)"
+    & curl.exe --fail --location --retry 3 --retry-all-errors --output $msixPath $SourceUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to download Codex App from $SourceUrl"
+    }
+
+    $actualSha256 = (Get-FileHash -LiteralPath $msixPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualSha256 -eq $codexAppMetadata.Sha256) {
+        break
+    }
+
+    if ($attempt -eq 3) {
+        throw "Codex App MSIX SHA-256 mismatch after 3 attempts. Expected $($codexAppMetadata.Sha256), got $actualSha256"
+    }
+
+    Write-Warning "Codex App latest link changed while downloading; resolving its metadata again."
+    Remove-Item -LiteralPath $msixPath -Force
 }
 
 & $sevenZip x $msixPath "-o$extractDir" -y
@@ -115,8 +183,8 @@ if (-not $identity) {
 if ($identity.ProcessorArchitecture -ne $appArchitecture) {
     throw "Codex App architecture mismatch. Expected $appArchitecture, got $($identity.ProcessorArchitecture)"
 }
-if ($identity.Version -ne $BasePackageVersion) {
-    throw "Codex App package version mismatch. Expected $BasePackageVersion, got $($identity.Version)"
+if ($identity.Version -ne $codexAppMetadata.PackageVersion) {
+    throw "Codex App package version mismatch. Expected $($codexAppMetadata.PackageVersion), got $($identity.Version)"
 }
 
 $appSourceDir = Join-Path -Path $extractDir -ChildPath "app"
@@ -215,8 +283,8 @@ installable MSIX. Replacing the Codex sidecars invalidates the original package
 signature, so package metadata and signatures are intentionally not included.
 Use a newly published archive to update this portable installation.
 
-Base Codex App version: $BaseAppVersion
-Base Windows package version: $BasePackageVersion
+Base Codex App version: $($codexAppMetadata.AppVersion)
+Base Windows package version: $($codexAppMetadata.PackageVersion)
 Fork release: $ForkReleaseTag
 Source ref: $SourceRef
 Original MSIX SHA-256: $actualSha256
@@ -225,8 +293,8 @@ Original MSIX SHA-256: $actualSha256
 $buildInfo = [ordered]@{
     schemaVersion = 1
     architecture = $appArchitecture
-    baseCodexAppVersion = $BaseAppVersion
-    baseWindowsPackageVersion = $BasePackageVersion
+    baseCodexAppVersion = $codexAppMetadata.AppVersion
+    baseWindowsPackageVersion = $codexAppMetadata.PackageVersion
     forkReleaseTag = $ForkReleaseTag
     sourceRef = $SourceRef
     sourceUrl = $SourceUrl
