@@ -1,9 +1,9 @@
 use crate::shell::ShellType;
 
 use super::*;
+use crate::git_bash_paths::PathDisplayStyle;
 use crate::git_bash_paths::format_path_uri_for_shell;
 use crate::git_bash_paths::path_display_style_for_shell;
-use crate::git_bash_paths::PathDisplayStyle;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;

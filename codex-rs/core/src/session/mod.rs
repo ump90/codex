@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -40,6 +39,7 @@ use crate::image_preparation::prepare_response_items as prepare_image_response_i
 use crate::image_preparation::unified_image_budget_enabled;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
+use crate::realtime_history::RealtimeEventOrder;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::ResolvedStepSettings;
 use crate::session::step_settings::StepSettings;
@@ -90,6 +90,7 @@ use codex_network_proxy::normalize_host;
 use codex_otel::current_span_trace_id;
 use codex_otel::current_span_w3c_trace_context;
 use codex_otel::set_parent_from_w3c_trace_context;
+use codex_protocol::ResponseUsageMetadata;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::ElicitationRequest;
@@ -119,6 +120,7 @@ use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
@@ -154,7 +156,7 @@ use codex_rollout::state_db;
 use codex_rollout_trace::AgentResultTracePayload;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
 use codex_rollout_trace::ThreadTraceContext;
-use codex_sandboxing::policy_transforms::intersect_permission_profiles;
+use codex_sandboxing::policy_transforms::intersect_permission_profiles_with_context;
 use codex_shell_command::parse_command::parse_command;
 use codex_terminal_detection::user_agent;
 use codex_thread_store::CreateThreadParams;
@@ -167,6 +169,7 @@ use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
 use codex_utils_audio::prepare_response_items as prepare_audio_response_items;
+use codex_utils_git_discovery::GitRootDiscovery;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use futures::future::Shared;
@@ -201,6 +204,7 @@ use crate::config::PermissionProfileState;
 use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
+use crate::context_manager::HistoryReplacement;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
@@ -225,6 +229,7 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+mod realtime_history;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
@@ -348,6 +353,7 @@ use codex_protocol::protocol::ModelVerificationEvent;
 use codex_protocol::protocol::NetworkApprovalContext;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::RequestUserInputEvent;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
@@ -359,6 +365,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::turn_input::TurnInputMode;
@@ -412,6 +419,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
+    pub(crate) git_root_discovery: Arc<GitRootDiscovery>,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) skills_service: Arc<HostSkillsService>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
@@ -477,28 +485,34 @@ const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyb
 
 impl Session {
     /// Spawn and initialize a new session.
-    pub(crate) async fn spawn(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
-        let parent_trace = match args.parent_trace {
-            Some(trace) => {
-                if codex_otel::context_from_w3c_trace_context(&trace).is_some() {
-                    Some(trace)
-                } else {
-                    warn!("ignoring invalid thread spawn trace carrier");
-                    None
+    /// Hide the concrete startup future from callers while keeping initialization lazy.
+    #[inline(never)]
+    pub(crate) fn spawn(
+        args: SessionSpawnArgs,
+    ) -> BoxFuture<'static, CodexResult<(Arc<Self>, SessionIo)>> {
+        Box::pin(async move {
+            let parent_trace = match args.parent_trace {
+                Some(trace) => {
+                    if codex_otel::context_from_w3c_trace_context(&trace).is_some() {
+                        Some(trace)
+                    } else {
+                        warn!("ignoring invalid thread spawn trace carrier");
+                        None
+                    }
                 }
+                None => None,
+            };
+            let thread_spawn_span = info_span!("thread_spawn", otel.name = "thread_spawn");
+            if let Some(trace) = parent_trace.as_ref() {
+                let _ = set_parent_from_w3c_trace_context(&thread_spawn_span, trace);
             }
-            None => None,
-        };
-        let thread_spawn_span = info_span!("thread_spawn", otel.name = "thread_spawn");
-        if let Some(trace) = parent_trace.as_ref() {
-            let _ = set_parent_from_w3c_trace_context(&thread_spawn_span, trace);
-        }
-        Self::spawn_internal(SessionSpawnArgs {
-            parent_trace,
-            ..args
+            Self::spawn_internal(SessionSpawnArgs {
+                parent_trace,
+                ..args
+            })
+            .instrument(thread_spawn_span)
+            .await
         })
-        .instrument(thread_spawn_span)
-        .await
     }
 
     async fn spawn_internal(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
@@ -509,6 +523,7 @@ impl Session {
             installation_id,
             auth_manager,
             models_manager,
+            git_root_discovery,
             environment_manager,
             skills_service,
             plugins_manager,
@@ -667,6 +682,10 @@ impl Session {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
+        // Intentionally resolve `enabled` and `use_history_notes_extension` only at
+        // thread startup. Both activation flags stay fixed for this thread runtime,
+        // even if the selected model changes later.
+        token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         let configured_config = Arc::clone(&config);
         let multi_agent_version = config.multi_agent_version_override().or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
@@ -759,6 +778,7 @@ impl Session {
             installation_id,
             auth_manager.clone(),
             models_manager.clone(),
+            git_root_discovery,
             model_info,
             exec_policy,
             tx_event.clone(),
@@ -1313,6 +1333,26 @@ impl Session {
         }
     }
 
+    /// Render the request copy without changing instructions persisted or inherited by forks.
+    pub(crate) async fn get_prompt_base_instructions(&self) -> BaseInstructions {
+        let config = self.get_config().await;
+        let instructions = self.get_base_instructions().await;
+        if !config.update_plan_enabled
+            && config.model_catalog.is_none()
+            && matches!(
+                instructions.provenance,
+                Some(BaseInstructionsProvenance::Model { .. })
+            )
+        {
+            BaseInstructions {
+                text: crate::context::without_update_plan_instructions(&instructions.text),
+                ..instructions
+            }
+        } else {
+            instructions
+        }
+    }
+
     // Merges connector IDs into the session-level explicit connector selection.
     #[tracing::instrument(
         level = "trace",
@@ -1409,6 +1449,8 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
+                self.state.lock().await.latest_token_usage_record =
+                    Self::last_token_usage_record_from_rollout(&rollout_items);
 
                 // Defer seeding the session's initial context until the first turn starts so
                 // turn/start overrides can be merged before we write to the rollout.
@@ -1429,6 +1471,8 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
+                self.state.lock().await.latest_token_usage_record =
+                    Self::last_token_usage_record_from_rollout(&rollout_items);
 
                 let thread_settings_applied =
                     RolloutItem::EventMsg(thread_settings::applied_event(self).await);
@@ -1496,6 +1540,7 @@ impl Session {
     ) -> Option<PreviousTurnSettings> {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
+            guardian_history,
             previous_turn_settings,
             reference_context_item,
             world_state_baseline,
@@ -1533,7 +1578,14 @@ impl Session {
             .collect();
         {
             let mut state = self.state.lock().await;
-            state.replace_annotated_history(history, reference_context_item);
+            state.replace_annotated_history(
+                history,
+                reference_context_item,
+                HistoryReplacement::Reset,
+            );
+            state
+                .history
+                .restore_guardian_history(guardian_history.as_ref());
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
@@ -1587,6 +1639,21 @@ impl Session {
             RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
             _ => None,
         })
+    }
+
+    fn last_token_usage_record_from_rollout(
+        rollout_items: &[RolloutItem],
+    ) -> Option<TokenUsageRecord> {
+        for item in rollout_items.iter().rev() {
+            match item {
+                RolloutItem::TokenUsageRecord(record) => return Some(record.clone()),
+                RolloutItem::Compacted(compacted) => {
+                    return compacted.latest_token_usage_record.clone();
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     async fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -1820,6 +1887,14 @@ impl Session {
             ) {
                 warn!("failed to refresh MCP auth storage config: {err}");
             }
+            if let Err(err) = config.features.set_enabled(
+                Feature::McpOAuthRefreshCoordination,
+                next_config
+                    .features
+                    .enabled(Feature::McpOAuthRefreshCoordination),
+            ) {
+                warn!("failed to refresh MCP OAuth coordination config: {err}");
+            }
             let config = Arc::new(config);
             state.session_configuration.original_config_do_not_use = Arc::clone(&config);
             self.mark_mcp_runtime_dirty();
@@ -1867,6 +1942,14 @@ impl Session {
             next_config.features.enabled(Feature::SecretAuthStorage),
         ) {
             warn!("failed to refresh MCP auth storage config: {err}");
+        }
+        if let Err(err) = config.features.set_enabled(
+            Feature::McpOAuthRefreshCoordination,
+            next_config
+                .features
+                .enabled(Feature::McpOAuthRefreshCoordination),
+        ) {
+            warn!("failed to refresh MCP OAuth coordination config: {err}");
         }
         state.session_configuration.original_config_do_not_use = Arc::new(config);
         self.mark_mcp_runtime_dirty();
@@ -2282,7 +2365,32 @@ impl Session {
     }
 
     async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+        // Keep realtime reduction, canonical append, and delivery in the same order.
+        // This lock must not acquire SessionState or ActiveTurn: event producers can
+        // already hold those locks. Host presentation policies are synchronous.
+        let mut realtime_history = match &self.realtime_history {
+            Some(history) => {
+                let history = history.lock().await;
+                history.should_observe(&event.msg).then_some(history)
+            }
+            None => None,
+        };
         self.services.mcp_runtime.observe_event(&event.msg);
+        let (before_event, after_event) = match realtime_history.as_mut() {
+            Some(history) => {
+                let effects = history.observe(&event.msg);
+                match effects.order {
+                    RealtimeEventOrder::BeforeEvent => (Some(effects), None),
+                    RealtimeEventOrder::AfterEvent => (None, Some(effects)),
+                }
+            }
+            None => (None, None),
+        };
+        if let Some(effects) = before_event
+            && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
+        {
+            warn!("failed to persist realtime history: {error}");
+        }
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
@@ -2291,6 +2399,11 @@ impl Session {
         self.services
             .rollout_thread_trace
             .record_protocol_event(&event.msg);
+        if let Some(effects) = after_event
+            && let Err(error) = self.send_realtime_history_effects(&event.id, effects).await
+        {
+            warn!("failed to persist realtime history: {error}");
+        }
         self.deliver_event_raw(event).await;
     }
 
@@ -2644,12 +2757,27 @@ impl Session {
         step_context: &Arc<StepContext>,
         call_id: String,
         args: RequestPermissionsArgs,
-        environment: TurnEnvironmentSelection,
+        environment_selection: TurnEnvironmentSelection,
         cancellation_token: CancellationToken,
     ) -> Option<RequestPermissionsResponse> {
         let turn_context = &step_context.turn;
         let approval_policy = step_context.settings.approval_policy();
         let approvals_reviewer = step_context.settings.approvals_reviewer();
+        let Some(environment) = step_context
+            .environments
+            .turn_environments()
+            .find(|candidate| {
+                candidate.selection.environment_id == environment_selection.environment_id
+            })
+            .cloned()
+        else {
+            return Some(RequestPermissionsResponse {
+                permissions: RequestPermissionProfile::default(),
+                scope: PermissionGrantScope::Turn,
+                strict_auto_review: false,
+            });
+        };
+        let cwd = environment.cwd();
         match approval_policy {
             AskForApproval::Never => {
                 return Some(RequestPermissionsResponse {
@@ -2673,19 +2801,14 @@ impl Session {
         }
 
         let requested_permissions = args.permissions;
-        // TODO(anp): Migrate request_permissions to support paths from foreign environments.
-        let Ok(native_environment_cwd) = environment.cwd.to_abs_path() else {
-            warn!(
-                cwd = %environment.cwd,
-                "request_permissions requires a cwd native to the Codex host"
-            );
+        let sandbox_context = environment.sandbox_context(/*additional_permissions*/ None);
+        let Some(context) = sandbox_context.policy_context() else {
             return Some(RequestPermissionsResponse {
                 permissions: RequestPermissionProfile::default(),
                 scope: PermissionGrantScope::Turn,
                 strict_auto_review: false,
             });
         };
-
         if crate::guardian::routes_approval_policy_to_guardian(approval_policy, approvals_reviewer)
         {
             let originating_turn_state = {
@@ -2755,17 +2878,30 @@ impl Session {
             let response = Self::normalize_request_permissions_response(
                 requested_permissions,
                 response,
-                native_environment_cwd.as_path(),
+                &context,
             );
             self.record_granted_request_permissions_for_turn(
                 &response,
-                &environment.environment_id,
+                &environment.selection.environment_id,
                 originating_turn_state.as_ref(),
             )
             .await;
             return Some(response);
         }
 
+        // The interactive approval event remains host-native until its public
+        // app-server/TUI boundary migrates in the next stack stage.
+        let Ok(native_cwd) = cwd.to_abs_path() else {
+            warn!(
+                cwd = %cwd,
+                "request_permissions interactive approval requires a cwd native to the Codex host"
+            );
+            return Some(RequestPermissionsResponse {
+                permissions: RequestPermissionProfile::default(),
+                scope: PermissionGrantScope::Turn,
+                strict_auto_review: false,
+            });
+        };
         let _elicitation = self.services.elicitations.register();
         let (tx_response, rx_response) = oneshot::channel();
         let prev_entry = {
@@ -2792,11 +2928,11 @@ impl Session {
         let event = EventMsg::RequestPermissions(RequestPermissionsEvent {
             call_id: call_id.clone(),
             turn_id: turn_context.sub_id.clone(),
-            environment_id: Some(environment.environment_id.clone()),
+            environment_id: Some(environment.selection.environment_id.clone()),
             started_at_ms: now_unix_timestamp_ms(),
             reason: args.reason,
             permissions: requested_permissions,
-            cwd: Some(native_environment_cwd),
+            cwd: Some(native_cwd),
         });
         self.send_event(turn_context.as_ref(), event).await;
         tokio::select! {
@@ -2907,29 +3043,25 @@ impl Session {
         };
         match entry {
             Some(entry) => {
-                // TODO(anp): Migrate request_permissions to support paths from foreign environments.
-                let response = match entry.environment.cwd.to_abs_path() {
-                    Ok(native_environment_cwd) => Self::normalize_request_permissions_response(
+                let sandbox_context = entry
+                    .environment
+                    .sandbox_context(/*additional_permissions*/ None);
+                let response = if let Some(context) = sandbox_context.policy_context() {
+                    Self::normalize_request_permissions_response(
                         entry.requested_permissions,
                         response,
-                        native_environment_cwd.as_path(),
-                    ),
-                    Err(err) => {
-                        warn!(
-                            cwd = %entry.environment.cwd,
-                            %err,
-                            "request_permissions requires a cwd native to the Codex host"
-                        );
-                        RequestPermissionsResponse {
-                            permissions: RequestPermissionProfile::default(),
-                            scope: PermissionGrantScope::Turn,
-                            strict_auto_review: false,
-                        }
+                        &context,
+                    )
+                } else {
+                    RequestPermissionsResponse {
+                        permissions: RequestPermissionProfile::default(),
+                        scope: PermissionGrantScope::Turn,
+                        strict_auto_review: false,
                     }
                 };
                 self.record_granted_request_permissions_for_turn(
                     &response,
-                    &entry.environment.environment_id,
+                    &entry.environment.selection.environment_id,
                     originating_turn_state.as_ref(),
                 )
                 .await;
@@ -2944,7 +3076,7 @@ impl Session {
     fn normalize_request_permissions_response(
         requested_permissions: RequestPermissionProfile,
         response: RequestPermissionsResponse,
-        cwd: &Path,
+        context: &FileSystemSandboxPolicyContext<'_>,
     ) -> RequestPermissionsResponse {
         if response.strict_auto_review && matches!(response.scope, PermissionGrantScope::Session) {
             return RequestPermissionsResponse {
@@ -2959,10 +3091,10 @@ impl Session {
         }
 
         RequestPermissionsResponse {
-            permissions: intersect_permission_profiles(
+            permissions: intersect_permission_profiles_with_context(
                 requested_permissions.into(),
                 response.permissions.into(),
-                cwd,
+                context,
             )
             .into(),
             scope: response.scope,
@@ -3386,11 +3518,14 @@ impl Session {
             if settings.selected().service_tier != root_service_tier {
                 let mut selected = settings.selected().clone();
                 selected.service_tier = root_service_tier;
-                settings = Arc::new(ResolvedStepSettings::new(
+                let mut inherited_settings = ResolvedStepSettings::new(
                     Arc::new(selected),
                     Arc::clone(&settings.model_info),
                     self.features.enabled(Feature::FastMode),
-                ));
+                );
+                inherited_settings.mcp_approvals_reviewer_override =
+                    settings.mcp_approvals_reviewer_override;
+                settings = Arc::new(inherited_settings);
             }
         }
         let token_budget = token_budget::resolve_token_budget(
@@ -3622,9 +3757,10 @@ impl Session {
         for envelope in &mut items {
             Self::assign_missing_response_item_id(&mut envelope.item);
         }
-        let compacted_item = CompactedItem {
+        let mut compacted_item = CompactedItem {
             message: metadata.message,
             replacement_history: Some(items.clone()),
+            guardian_history: None,
             mcp_resource_origins: self.services.mcp_runtime.resource_origin_checkpoint(),
             window_number: Some(metadata.window_number),
             first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
@@ -3633,6 +3769,8 @@ impl Session {
                 .previous_window_id
                 .map(|id| id.to_string()),
             window_id: Some(metadata.window_ids.window_id.to_string()),
+            compaction_response_id: metadata.compaction_response_id,
+            latest_token_usage_record: self.state.lock().await.latest_token_usage_record.clone(),
         };
         // Wait for accepted updates to finish persisting, then keep later updates from
         // overtaking the current settings snapshot while its checkpoint is written.
@@ -3641,7 +3779,12 @@ impl Session {
         let mut world_state_item = None;
         {
             let mut state = self.state.lock().await;
-            state.replace_annotated_history(items, reference_context_item.clone());
+            state.replace_annotated_history(
+                items,
+                reference_context_item.clone(),
+                HistoryReplacement::Compaction,
+            );
+            compacted_item.guardian_history = state.history.guardian_history_checkpoint();
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
                 world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));
@@ -4079,6 +4222,7 @@ impl Session {
                 message: String::new(),
                 window_number,
                 window_ids,
+                compaction_response_id: None,
             },
         )
         .await;
@@ -4191,6 +4335,40 @@ impl Session {
             .await;
         self.send_token_count_event(turn_context).await;
         result
+    }
+
+    pub(crate) async fn record_observed_response_completed(
+        &self,
+        turn_context: &TurnContext,
+        response_id: &str,
+        usage: Option<&TokenUsage>,
+        usage_metadata: Option<&ResponseUsageMetadata>,
+    ) {
+        self.send_event(
+            turn_context,
+            EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
+                response_id: response_id.to_string(),
+                token_usage: usage.cloned(),
+                usage_metadata: usage_metadata.cloned(),
+            }),
+        )
+        .await;
+        let Some(usage) = usage else {
+            return;
+        };
+        let record = self.state.lock().await.record_token_usage(
+            self.thread_id,
+            &turn_context.sub_id,
+            self.session_id(),
+            turn_context
+                .turn_metadata_state
+                .root_turn_id()
+                .unwrap_or_else(|| turn_context.sub_id.clone()),
+            response_id.to_string(),
+            usage,
+        );
+        self.persist_rollout_items(&[RolloutItem::TokenUsageRecord(record)])
+            .await;
     }
 
     pub(crate) async fn record_token_usage_info(
