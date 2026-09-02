@@ -35,6 +35,7 @@ on:
 # nested submodules. Prefer the system git CLI across every Cargo invocation.
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CODEX_REPO_ROOT: ${{ github.workspace }}
   CODEX_APP_CHECKSUMS_URL: "https://codexapp.agentsmirror.com/latest/checksums"
   CODEX_APP_MANIFEST_URL: "https://codexapp.agentsmirror.com/latest/manifest"
   CODEX_APP_WINDOWS_ARM64_URL: "https://codexapp.agentsmirror.com/latest/win-arm64"
@@ -311,6 +312,9 @@ jobs:
             --code-mode-host-bin (Join-Path -Path $releaseDir -ChildPath "codex-code-mode-host.exe") `
             --codex-command-runner-bin (Join-Path -Path $releaseDir -ChildPath "codex-command-runner.exe") `
             --codex-windows-sandbox-setup-bin (Join-Path -Path $releaseDir -ChildPath "codex-windows-sandbox-setup.exe")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to build the portable Codex package for $target"
+          }
 
           $sevenZip = Get-SevenZip
           $gitAssetPattern = switch ($target) {
