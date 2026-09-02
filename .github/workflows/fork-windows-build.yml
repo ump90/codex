@@ -34,6 +34,9 @@ jobs:
     name: Build ${{ inputs.target }} from ${{ inputs.ref }}
     runs-on: windows-latest
     timeout-minutes: 360
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     defaults:
       run:
         working-directory: codex-rs
@@ -62,6 +65,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ inputs.target }}
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          version: v0.16.0
 
       - name: Configure MSVC environment
         uses: ./.github/actions/setup-msvc-env
