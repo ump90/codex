@@ -127,6 +127,5 @@ Git Bash 路径仍应用于命令和工具的结构化路径参数。Codex App �
 维护者可继续阅读：
 
 - [二开维护与合并手册](./FORK_README.md)
-- [2026-08-01 主线合并审查记录](./FORK_MERGE_REVIEW_2026-08-01.md)
 - [上游 Codex 文档](https://developers.openai.com/codex)
 - [许可证](./LICENSE)
