@@ -235,12 +235,9 @@ jobs:
           }
 
           $binaries = $env:WINDOWS_BINARIES -split " "
-          $buildArgs = @("build", "--target", $target, "--release", "--timings")
-          foreach ($binary in $binaries) {
-            $buildArgs += @("--bin", $binary)
-          }
-
-          cargo @buildArgs
+          & ..\.github\scripts\cargo-build-windows-with-sccache-fallback.ps1 `
+            -Target $target `
+            -Binaries $binaries
 
       - name: Upload Cargo timings
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

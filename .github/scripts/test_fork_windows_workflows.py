@@ -41,6 +41,25 @@ class ForkWindowsWorkflowTest(unittest.TestCase):
         self.assertIn("--code-mode-host-bin", text)
         self.assertIn("codex-code-mode-host.exe", text)
 
+    def test_windows_builds_retry_sccache_transport_failures_without_sccache(
+        self,
+    ) -> None:
+        script = (
+            REPO_ROOT
+            / ".github"
+            / "scripts"
+            / "cargo-build-windows-with-sccache-fallback.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("sccache: caused by:", script)
+        self.assertIn("Remove-Item Env:RUSTC_WRAPPER", script)
+
+        for workflow_name in ["fork-release.yml", "fork-windows-build.yml"]:
+            with self.subTest(workflow=workflow_name):
+                self.assertIn(
+                    "cargo-build-windows-with-sccache-fallback.ps1",
+                    workflow_text(workflow_name),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
