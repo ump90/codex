@@ -1,5 +1,8 @@
 //! App-level orchestration tests for the TUI.
 
+#[path = "tests/daybreak_tests.rs"]
+mod daybreak_tests;
+
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
 #[path = "tests/agents_navigation_tests.rs"]
@@ -12,15 +15,23 @@ mod backend_banner_recovery_tests;
 mod backend_banner_startup_tests;
 #[path = "tests/background_exit_tests.rs"]
 mod background_exit_tests;
+#[path = "tests/buffered_replay.rs"]
+mod buffered_replay;
 #[path = "tests/connector_policy.rs"]
 mod connector_policy;
 #[path = "tests/disconnect_tests.rs"]
 mod disconnect;
 #[path = "tests/key_chords.rs"]
 mod key_chords;
+#[path = "tests/luna_reserve_recovery_tests.rs"]
+mod luna_reserve_recovery_tests;
 #[path = "tests/mcp_startup.rs"]
 mod mcp_startup;
+#[path = "tests/misalignment_policy_tests.rs"]
+mod misalignment_policy;
 mod model_catalog;
+#[path = "tests/model_defaults_tests.rs"]
+mod model_defaults;
 #[path = "tests/patch_approval_tests.rs"]
 mod patch_approval_tests;
 #[path = "tests/permission_shortcuts_tests.rs"]
@@ -34,6 +45,8 @@ mod safety_buffering;
 mod session_lifecycle_requests;
 mod session_summary;
 mod startup;
+#[path = "tests/startup_warnings_tests.rs"]
+mod startup_warnings_tests;
 #[path = "tests/stream_animation_tests.rs"]
 mod stream_animation_tests;
 #[path = "tests/thread_usage.rs"]
@@ -272,6 +285,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
 
     app.handle_mcp_inventory_result(
         Ok(vec![McpServerStatus {
+            tools_error: None,
             name: "docs".to_string(),
             runtime_status: None,
             plugin_id: None,
@@ -688,7 +702,16 @@ async fn history_lookup_response_is_routed_to_requesting_thread() -> Result<()> 
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
 
-    app.lookup_message_history_entry(thread_id, /*offset*/ 0, /*log_id*/ 1)
+    let local_home = tempfile::tempdir()?;
+    app.local_settings.codex_home = AbsolutePathBuf::from_absolute_path(local_home.path())?;
+    let history_config = codex_message_history::HistoryConfig::new(
+        app.local_settings.codex_home.clone(),
+        &app.local_settings.history,
+    );
+    codex_message_history::append_entry("local prompt", thread_id, &history_config).await?;
+    let (log_id, _) = codex_message_history::history_metadata(&history_config).await;
+
+    app.lookup_message_history_entry(thread_id, /*offset*/ 0, log_id)
         .await?;
 
     let app_event = tokio::time::timeout(Duration::from_secs(1), app_event_rx.recv())
@@ -708,13 +731,13 @@ async fn history_lookup_response_is_routed_to_requesting_thread() -> Result<()> 
         event,
         HistoryLookupResponse::Entry {
             offset: 0,
-            log_id: 1,
-            entry: None,
+            log_id,
+            entry: Some("local prompt".to_string()),
         }
     );
 
-    let cursor = codex_message_history::HistoryBatchCursor::new(/*end_offset*/ 10);
-    app.lookup_message_history_batch(thread_id, cursor, /*log_id*/ 1)
+    let cursor = codex_message_history::HistoryBatchCursor::new(/*end_offset*/ 1);
+    app.lookup_message_history_batch(thread_id, cursor, log_id)
         .await?;
     let app_event = tokio::time::timeout(Duration::from_secs(1), app_event_rx.recv())
         .await
@@ -730,7 +753,15 @@ async fn history_lookup_response_is_routed_to_requesting_thread() -> Result<()> 
     assert_eq!(routed_thread_id, thread_id);
     assert_eq!(
         event,
-        HistoryLookupResponse::BatchError { cursor, log_id: 1 }
+        HistoryLookupResponse::Batch {
+            cursor,
+            log_id,
+            entries: vec![HistoryBatchEntryResponse {
+                offset: 0,
+                entry: Some("local prompt".to_string()),
+            }],
+            next_older_cursor: None,
+        }
     );
 
     Ok(())
@@ -3809,7 +3840,7 @@ async fn inactive_thread_permissions_approval_preserves_file_system_permissions(
             item_id: "call-approval".to_string(),
             environment_id: Some("remote".to_string()),
             started_at_ms: 0,
-            cwd: test_absolute_path("/tmp"),
+            cwd: test_absolute_path("/tmp").into(),
             reason: Some("Need access to .git".to_string()),
             permissions: codex_app_server_protocol::RequestPermissionProfile {
                 network: Some(AdditionalNetworkPermissions {
@@ -4035,6 +4066,8 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
         agent_thread_id,
         ServerNotification::ThreadStarted(ThreadStartedNotification {
             thread: Thread {
+                originator: None,
+                environments: None,
                 id: agent_thread_id.to_string(),
                 extra: None,
                 session_id: agent_thread_id.to_string(),
@@ -4045,6 +4078,7 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 section: None,
                 section_entered_at: None,
                 project_id: None,
+                daybreak_enabled: None,
                 history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
                 model: None,
@@ -4136,6 +4170,8 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
         agent_thread_id,
         ServerNotification::ThreadStarted(ThreadStartedNotification {
             thread: Thread {
+                originator: None,
+                environments: None,
                 id: agent_thread_id.to_string(),
                 extra: None,
                 session_id: agent_thread_id.to_string(),
@@ -4146,6 +4182,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 section: None,
                 section_entered_at: None,
                 project_id: None,
+                daybreak_enabled: None,
                 history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
                 model: None,
@@ -4204,6 +4241,8 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
     app.primary_session_configured = Some(primary_session);
 
     let thread = Thread {
+        originator: None,
+        environments: None,
         id: read_thread_id.to_string(),
         extra: None,
         session_id: read_thread_id.to_string(),
@@ -4214,6 +4253,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         section: None,
         section_entered_at: None,
         project_id: None,
+        daybreak_enabled: None,
         history_mode: Default::default(),
         model_provider: "read-provider".to_string(),
         model: None,
@@ -4834,7 +4874,9 @@ async fn primary_thread_ignores_child_mcp_startup_notifications() {
     let mut rendered_cells = Vec::new();
     while let Ok(event) = app_event_rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
-            rendered_cells.push(lines_to_single_string(&cell.display_lines(/*width*/ 120)));
+            rendered_cells.push(lines_to_single_string(
+                &cell.transcript_lines(/*width*/ 120),
+            ));
         }
     }
     let rendered = rendered_cells.join("\n");
@@ -4951,12 +4993,24 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
         app.handle_thread_event_now(event);
     }
 
+    let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
     let mut rendered_cells = Vec::new();
     while let Ok(event) = app_event_rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
-            rendered_cells.push(lines_to_single_string(&cell.display_lines(/*width*/ 120)));
+            rendered_cells.push(lines_to_single_string(
+                &cell.transcript_lines(/*width*/ 120),
+            ));
+            app.insert_history_cell(&mut tui, cell);
         }
     }
+    let inline = app
+        .transcript_cells
+        .iter()
+        .flat_map(|cell| cell.display_lines(/*width*/ 120))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(inline.contains("1 MCP startup issue"));
     let rendered = rendered_cells.join("\n");
     assert!(app.chat_widget.side_conversation_active());
     assert_eq!(rendered.matches("sentry is not logged in").count(), 1);
@@ -5432,6 +5486,7 @@ async fn make_test_app() -> App {
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
     App {
+        feature_write_lock: Arc::default(),
         model_catalog: chat_widget.model_catalog(),
         session_telemetry,
         app_event_tx,
@@ -5478,6 +5533,7 @@ async fn make_test_app() -> App {
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
         temporary_structured_requests: HashMap::new(),
+        pending_thread_titles: HashSet::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         agents_overview: Default::default(),
@@ -5503,7 +5559,7 @@ async fn make_test_app() -> App {
     }
 }
 
-async fn make_test_app_with_channels() -> (
+pub(super) async fn make_test_app_with_channels() -> (
     App,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
@@ -5516,6 +5572,7 @@ async fn make_test_app_with_channels() -> (
 
     (
         App {
+            feature_write_lock: Arc::default(),
             model_catalog: chat_widget.model_catalog(),
             session_telemetry,
             app_event_tx,
@@ -5562,6 +5619,7 @@ async fn make_test_app_with_channels() -> (
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             temporary_structured_requests: HashMap::new(),
+            pending_thread_titles: HashSet::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             agents_overview: Default::default(),
@@ -5914,6 +5972,49 @@ async fn resize_reflow_wraps_transcript_early_when_pet_is_enabled() {
         with_pet.lines.len() > without_pet.lines.len(),
         "expected pet-enabled transcript reflow to wrap earlier"
     );
+}
+
+#[tokio::test]
+async fn closing_fullscreen_inline_overlay_restores_history_once() -> Result<()> {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    app.transcript_cells = vec![plain_line_cell("Previous conversation")];
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_alt_screen_enabled(/*enabled*/ false);
+    let screen_size = tui.terminal.last_known_screen_size;
+    tui.insert_history_lines(vec![Line::from("Previous conversation")]);
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+
+    // Content-height popups keep the existing history without rebuilding scrollback.
+    let popup_height = screen_size.height - 1;
+    tui.draw(popup_height, |_| {})?;
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+    assert!(app.last_rendered_history_tail.is_none());
+
+    tui.enter_alt_screen()?;
+    tui.draw(screen_size.height, |_| {})?;
+    tui.leave_alt_screen()?;
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+
+    assert!(tui.terminal.viewport_area.height < screen_size.height);
+    assert!(tui.terminal.viewport_area.y > 0);
+    let tail = app
+        .last_rendered_history_tail
+        .as_ref()
+        .expect("fullscreen exit rebuilt history");
+    assert_snapshot!(
+        tail.lines
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        @"Previous conversation"
+    );
+
+    let deferred = vec![Line::from("Pending history").into()];
+    app.deferred_history_lines = deferred.clone();
+    app.render_chat_widget_frame(&mut tui, screen_size)?;
+    assert_eq!(app.deferred_history_lines, deferred);
+    Ok(())
 }
 
 #[tokio::test]

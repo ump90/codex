@@ -98,6 +98,7 @@ impl ChatWidget {
             pet_http_client.clone(),
         );
         let mut widget = Self {
+            cyber_policy_notice: Default::default(),
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_target,
@@ -125,6 +126,8 @@ impl ChatWidget {
             has_codex_backend_auth,
             model_catalog,
             model_popup_request_id: None,
+            permission_popup_request_id: None,
+            permission_profiles_menu_opened: false,
             model_popup_model_ids: Vec::new(),
             session_telemetry,
             session_header: SessionHeader::new(header_model),
@@ -153,7 +156,9 @@ impl ChatWidget {
             codex_spend_control_reached: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             backend_banner_state: backend_banners::BackendBannerState::default(),
+            automatic_model_switch_state: backend_banners::AutomaticModelSwitchState::default(),
             backend_banner_notice_model: None,
+            luna_reserve_notice_account_id: None,
             warning_display_state: WarningDisplayState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             add_credits_nudge_email_in_flight: None,
@@ -208,11 +213,10 @@ impl ChatWidget {
             pet_image_support_override: None,
             thread_id: None,
             thread_name: None,
-            pending_automatic_thread_names: HashSet::new(),
             thread_rename_block_message: None,
             active_side_conversation: false,
             blocks_direct_input: false,
-            misalignment_policy_violation: false,
+            misalignment_policy_violation: None,
             normal_placeholder_text: placeholder,
             side_placeholder_text: side_placeholder,
             forked_from: None,
@@ -305,6 +309,10 @@ impl ChatWidget {
             .bottom_pane
             .set_token_activity_command_enabled(widget.has_codex_backend_auth);
         widget.refresh_status_surfaces();
+        widget.bottom_pane.set_astra_sparkle(
+            widget.effective_collaboration_mode().model(),
+            &widget.local_settings.tui,
+        );
 
         widget
     }

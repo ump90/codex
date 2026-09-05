@@ -36,14 +36,9 @@ pub(super) async fn reconnect(
     presentation: ReconnectPresentation,
 ) -> Result<Reconnected> {
     let mode = target.thread_params_mode();
-    let endpoint = match target {
-        AppServerTarget::Remote { endpoint } | AppServerTarget::LocalDaemon { endpoint } => {
-            endpoint
-        }
-        AppServerTarget::Embedded => {
-            color_eyre::eyre::bail!("in-process sessions have no connection to restore")
-        }
-    };
+    if matches!(target, AppServerTarget::Embedded) {
+        color_eyre::eyre::bail!("in-process sessions have no connection to restore");
+    }
     if let ThreadToolTransport::Mcp(server) = &task_tools {
         server.suspend();
     }
@@ -58,7 +53,7 @@ pub(super) async fn reconnect(
     for delay in [0, 1, 2, 4, 8] {
         let attempt = async {
             tokio::time::sleep(Duration::from_secs(delay)).await;
-            let client = crate::connect_remote_app_server(endpoint.clone()).await?;
+            let client = crate::app_server_connection::connect(&target).await?;
             let mut session = AppServerSession::new(client, mode)
                 .with_startup_config(&config)
                 .with_remote_cwd_override(remote_cwd.clone())
@@ -191,6 +186,8 @@ impl App {
             self.agents_overview.request_id = None;
             self.agents_overview.refresh_pending = false;
             self.agents_overview.refresh_notifications.clear();
+            self.agents_overview.activity.clear();
+            self.agents_overview.last_messages.clear();
             self.reconnect.presentation = if self
                 .chat_widget
                 .selected_index_for_active_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
@@ -247,6 +244,7 @@ impl App {
         self.rate_limit_refresh_state.invalidate_recovery();
         session.inherit_task_tool_capabilities(app_server);
         *app_server = session;
+        self.chat_widget.cyber_policy_notice = Default::default();
         self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
         self.chat_widget.remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
@@ -258,12 +256,17 @@ impl App {
         )));
         self.file_search =
             FileSearchManager::new(self.config.cwd.to_path_buf(), self.app_event_tx.clone());
-        self.model_catalog = Arc::new(ModelCatalog::new(bootstrap.available_models));
+        self.model_catalog = Arc::new(
+            ModelCatalog::new(bootstrap.available_models)
+                .with_collaboration_modes(bootstrap.collaboration_modes),
+        );
         self.pending_app_server_requests.clear();
         self.pending_primary_events.clear();
         self.pending_plugin_enabled_writes.clear();
         self.pending_hook_enabled_writes.clear();
         self.temporary_structured_requests.clear();
+        self.pending_thread_titles.clear();
+        self.sync_thread_title_progress();
         self.agents_overview.dispatched_requests.clear();
         self.agents_overview.request_id = None;
         self.agents_overview.refresh_pending = false;
@@ -389,6 +392,13 @@ impl App {
             bootstrap.has_chatgpt_account,
             matches!(bootstrap.auth_mode, Some(TelemetryAuthMode::Chatgpt)),
         );
+        if self.chat_widget.has_chatgpt_account() {
+            crate::daybreak::prefetch_notice(
+                &self.config,
+                app_server,
+                self.chat_widget.cyber_policy_notice.clone(),
+            );
+        }
         self.feedback_audience = bootstrap.feedback_audience;
         self.chat_widget.add_info_message(
             "Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.".into(), /*hint*/ None,
