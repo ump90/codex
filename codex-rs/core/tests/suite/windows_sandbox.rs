@@ -109,6 +109,12 @@ fn stage_windows_sandbox_helpers() -> anyhow::Result<()> {
         let helper = codex_utils_cargo_bin::cargo_bin(helper_name)?;
         let file_name = Path::new(helper_name).with_extension("exe");
         let destination = resources_dir.join(file_name);
+        if let Ok(staged) = std::fs::metadata(&destination) {
+            let source = std::fs::metadata(&helper)?;
+            if source.len() == staged.len() && source.modified()? == staged.modified()? {
+                continue;
+            }
+        }
         if let Err(err) = std::fs::copy(&helper, &destination) {
             // A sandbox helper can briefly remain alive after the sandboxed
             // command exits. Bazel may retry the test while that process still
