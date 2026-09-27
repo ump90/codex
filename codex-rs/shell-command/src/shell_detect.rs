@@ -442,6 +442,15 @@ pub fn get_shell_by_model_provided_path(shell_path: &PathBuf) -> DetectedShell {
         .unwrap_or_else(ultimate_fallback_shell)
 }
 
+pub fn resolve_requested_shell(
+    shell_path: &PathBuf,
+) -> Result<DetectedShell, ShellResolutionError> {
+    match detect_shell_type(shell_path) {
+        Some(shell_type) => resolve_model_provided_shell(shell_type, shell_path),
+        None => Ok(ultimate_fallback_shell()),
+    }
+}
+
 pub fn get_shell(shell_type: ShellType) -> Option<DetectedShell> {
     match shell_type {
         ShellType::Zsh => get_zsh_shell(),

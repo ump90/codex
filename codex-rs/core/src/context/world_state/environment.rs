@@ -5,6 +5,7 @@ use crate::context::environment_context::FileSystemContext;
 use crate::context::environment_context::NetworkContext;
 use crate::context::environment_context::push_xml_escaped_text;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::git_bash_paths::format_path_uri_for_shell;
 use crate::git_bash_paths::path_display_style_for_shell;
 use crate::session::turn_context::TurnContext;
@@ -64,7 +65,7 @@ impl EnvironmentsState {
             network: network_from_turn_context(turn_context),
             filesystem: environments.primary().map(|environment| {
                 let path_display_style = path_display_style_for_shell(
-                    environment.shell.as_ref().map(|shell| shell.name()),
+                    environment.shell.as_ref().map(crate::shell::Shell::name),
                     environment.cwd(),
                 );
                 FileSystemContext::from_permission_profile(
@@ -98,6 +99,7 @@ impl EnvironmentsState {
             shell_version: self.shell_version.clone(),
             shell_version_removed: false,
             current_date: self.current_date.clone(),
+            current_date_removed: false,
             timezone: self.timezone.clone(),
             network: self.network.clone(),
             filesystem: self.filesystem.clone(),
@@ -121,6 +123,7 @@ impl WorldStateSection for EnvironmentsState {
                         EnvironmentSnapshot {
                             cwd: environment.cwd.inferred_native_path_string(),
                             status: environment.status,
+                            error: environment.error.clone(),
                             shell: environment.shell.clone(),
                             is_primary: self.environments.len() > 1 && environment.is_primary,
                         },
@@ -188,6 +191,8 @@ impl WorldStateSection for EnvironmentsState {
                 shell_version_removed: self.shell_version.is_none()
                     && previous.shell_version.is_some(),
                 current_date: self.current_date.clone(),
+                current_date_removed: self.current_date.is_none()
+                    && previous.current_date.is_some(),
                 timezone: self.timezone.clone(),
                 network: self.network.clone(),
                 filesystem: self.filesystem.clone(),
@@ -226,6 +231,7 @@ struct RenderedEnvironments {
     shell_version: Option<String>,
     shell_version_removed: bool,
     current_date: Option<String>,
+    current_date_removed: bool,
     timezone: Option<String>,
     network: Option<NetworkContext>,
     filesystem: Option<FileSystemContext>,
@@ -294,7 +300,11 @@ impl ContextualUserFragment for RenderedEnvironments {
             let shell_version = self.shell_version.as_deref();
             push_optional_element(&mut rendered, "shell_version", shell_version);
         }
-        push_optional_element(&mut rendered, "current_date", self.current_date.as_deref());
+        if self.current_date_removed {
+            rendered.push_str("  <current_date status=\"unavailable\" />\n");
+        } else {
+            push_optional_element(&mut rendered, "current_date", self.current_date.as_deref());
+        }
         push_optional_element(&mut rendered, "timezone", self.timezone.as_deref());
         if let Some(network) = &self.network {
             rendered.push_str("  ");
@@ -331,6 +341,16 @@ fn push_environment_values(rendered: &mut String, environment: &EnvironmentState
         rendered.push_str(indent);
         rendered.push_str("<status>starting</status>\n");
     }
+    if environment.status == EnvironmentStatus::Failed {
+        rendered.push_str(indent);
+        rendered.push_str("<status>failed</status>\n");
+    }
+    if let Some(error) = &environment.error {
+        rendered.push_str(indent);
+        rendered.push_str("<error>");
+        push_xml_escaped_text(rendered, error);
+        rendered.push_str("</error>\n");
+    }
     if let Some(shell) = &environment.shell {
         rendered.push_str(indent);
         rendered.push_str("<shell>");
@@ -357,6 +377,7 @@ struct EnvironmentState {
     cwd: PathUri,
     status: EnvironmentStatus,
     shell: Option<String>,
+    error: Option<String>,
     is_primary: bool,
 }
 
@@ -377,6 +398,8 @@ struct EnvironmentSnapshot {
     cwd: String,
     status: EnvironmentStatus,
     shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_primary: bool,
 }
@@ -385,6 +408,7 @@ impl EnvironmentSnapshot {
     fn has_same_diff_value(&self, other: &Self) -> bool {
         self.cwd == other.cwd
             && self.status == other.status
+            && self.error == other.error
             && self.is_primary == other.is_primary
             && self
                 .shell
@@ -399,6 +423,7 @@ impl EnvironmentSnapshot {
 enum EnvironmentStatus {
     Starting,
     Available,
+    Failed,
 }
 
 async fn powershell_version(shell_path: &Path) -> Option<String> {
@@ -451,6 +476,7 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
                 EnvironmentState {
                     cwd: environment.cwd().clone(),
                     status: EnvironmentStatus::Available,
+                    error: None,
                     shell: environment
                         .shell
                         .as_ref()
@@ -466,9 +492,32 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
             .or_insert_with(|| EnvironmentState {
                 cwd: environment.selection.cwd.clone(),
                 status: EnvironmentStatus::Starting,
+                error: None,
                 shell: None,
                 is_primary: false,
             });
+    }
+    // Bound the additional model context even when many selected environments fail.
+    const MAX_ERROR_BYTES: usize = 256;
+    const MAX_TOTAL_ERROR_BYTES: usize = 512;
+    let mut remaining_error_bytes = MAX_TOTAL_ERROR_BYTES;
+    for environment in &snapshot.environments {
+        if let TurnEnvironmentState::Failed { selection, error } = environment {
+            let detail = error
+                [..error.floor_char_boundary(remaining_error_bytes.min(MAX_ERROR_BYTES))]
+                .to_string();
+            remaining_error_bytes -= detail.len();
+            environments.insert(
+                selection.environment_id.clone(),
+                EnvironmentState {
+                    cwd: selection.cwd.clone(),
+                    status: EnvironmentStatus::Failed,
+                    shell: None,
+                    error: (!detail.is_empty()).then_some(detail),
+                    is_primary: false,
+                },
+            );
+        }
     }
     environments
 }

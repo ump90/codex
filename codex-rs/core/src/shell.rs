@@ -87,6 +87,12 @@ pub fn get_shell_by_model_provided_path(shell_path: &PathBuf) -> Shell {
     codex_shell_command::shell_detect::get_shell_by_model_provided_path(shell_path).into()
 }
 
+pub(crate) fn resolve_requested_shell(shell_path: &PathBuf) -> Result<Shell, String> {
+    codex_shell_command::shell_detect::resolve_requested_shell(shell_path)
+        .map(Into::into)
+        .map_err(|err| err.to_string())
+}
+
 pub fn get_shell(shell_type: ShellType) -> Option<Shell> {
     codex_shell_command::shell_detect::get_shell(shell_type).map(Into::into)
 }

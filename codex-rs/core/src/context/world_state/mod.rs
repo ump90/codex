@@ -12,7 +12,6 @@ mod multi_agent_mode;
 mod multi_agent_usage_hint;
 mod permissions;
 mod persistent_mode;
-mod personality;
 mod plugins_instructions;
 mod realtime;
 #[cfg(test)]
@@ -53,7 +52,6 @@ pub(crate) use multi_agent_mode::MultiAgentModeState;
 pub(crate) use multi_agent_usage_hint::MultiAgentUsageHintState;
 pub(crate) use permissions::PermissionsState;
 pub(crate) use persistent_mode::PersistentModeState;
-pub(crate) use personality::PersonalityState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
 pub(crate) use realtime::RealtimeState;
 pub(crate) use tools::ToolsState;
@@ -404,6 +402,7 @@ impl WorldState {
     }
 
     /// Renders each section against the exact persisted snapshot when available.
+    #[cfg(test)]
     pub(crate) fn render_diff(
         &self,
         previous: &WorldStateSnapshot,

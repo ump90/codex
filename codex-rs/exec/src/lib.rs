@@ -2,6 +2,7 @@
 //   stdout is the final message (if any).
 // - In --json mode, stdout must be valid JSONL, one event per line.
 // For both modes, any other output must be written to stderr.
+#![recursion_limit = "256"]
 #![deny(clippy::print_stdout)]
 
 mod cli;
@@ -9,13 +10,14 @@ mod event_processor;
 mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
 pub(crate) mod exec_events;
+mod worktree;
 
 pub use cli::Cli;
 pub use cli::Command;
 pub use cli::ReviewArgs;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use codex_app_server_client::EnvironmentManager;
-use codex_app_server_client::ExecServerRuntimePaths;
+use codex_app_server_client::ExecServerRuntimeOptions;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::InProcessServerEvent;
@@ -234,6 +236,7 @@ struct ExecRunArgs {
 struct ManagedExecWorktree {
     manager: WorktreeManager,
     checkout: PathBuf,
+    source_cwd: PathBuf,
 }
 
 fn exec_root_span() -> tracing::Span {
@@ -259,7 +262,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     }
 
     let Cli {
-        command,
+        mut command,
         strict_config,
         shared,
         thread_source,
@@ -365,7 +368,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         ignore_user_and_project_exec_policy_rules: ignore_rules,
         ..Default::default()
     };
-
     if worktree
         && EnvironmentManager::prepare_from_codex_home(&codex_home)
             .await?
@@ -375,6 +377,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     }
 
     let managed_worktree = if worktree {
+        let embedded_network_policy =
+            codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
         let gate_bootstrap = load_bootstrap_config_or_exit(
             &codex_home,
             /*cwd*/ None,
@@ -385,7 +389,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         )
         .await;
         let gate_cloud_config = cloud_config_bundle_loader_for_storage(
-            bootstrap_auth_config(&codex_home, &gate_bootstrap)?,
+            embedded_network_policy
+                .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &gate_bootstrap)?),
             /*enable_codex_api_key_env*/ false,
         )
         .await?;
@@ -398,7 +403,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             })
             .fallback_cwd(Some(config_cwd.to_path_buf()))
             .strict_config(strict_config)
-            .cloud_config_bundle(gate_cloud_config)
+            .cloud_config_bundle(gate_cloud_config.clone())
             .build()
             .await?;
         if !gate_config.features.enabled(Feature::Worktrees) {
@@ -406,9 +411,42 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
                 "--worktree requires the worktrees feature; enable it with --enable worktrees"
             );
         }
+        if let Some(ExecCommand::Fork(args)) = command.as_mut() {
+            let saved_cwd = worktree::fork_source(
+                args,
+                &gate_config,
+                &arg0_paths,
+                &cli_kv_overrides,
+                &loader_overrides,
+                worktree::ForkNetwork {
+                    cloud_config_bundle: gate_cloud_config.clone(),
+                    policy: embedded_network_policy.clone(),
+                },
+                strict_config,
+            )
+            .await?;
+            if resolved_cwd.is_none() {
+                config_cwd = AbsolutePathBuf::from_absolute_path(saved_cwd)?;
+            }
+        }
+        let source_config = ConfigBuilder::default()
+            .codex_home(codex_home.to_path_buf())
+            .cli_overrides(cli_kv_overrides.clone())
+            .loader_overrides(LoaderOverrides {
+                ignore_project_config: true,
+                ..loader_overrides.clone()
+            })
+            .fallback_cwd(Some(config_cwd.to_path_buf()))
+            .strict_config(strict_config)
+            .cloud_config_bundle(gate_cloud_config)
+            .build()
+            .await?;
+        if source_config.active_project.is_untrusted() {
+            anyhow::bail!("--worktree requires a source that is not explicitly untrusted");
+        }
         for path in &mut add_dir {
             if path.is_relative() {
-                *path = config_cwd.as_path().join(&*path);
+                *path = std::env::current_dir()?.join(&*path);
             }
         }
         // Allocation belongs to the host, not this session's project, profile, or overrides.
@@ -433,10 +471,13 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         Some(ManagedExecWorktree {
             manager,
             checkout: checkout.root,
+            source_cwd: checkout.source_cwd,
         })
     } else {
         None
     };
+    let embedded_network_policy =
+        codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
     let bootstrap_config = load_bootstrap_config_or_exit(
         &codex_home,
         Some(&config_cwd),
@@ -447,7 +488,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-    let bootstrap_auth_config = bootstrap_auth_config(&codex_home, &bootstrap_config)?;
+    let bootstrap_auth_config = embedded_network_policy
+        .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &bootstrap_config)?);
     // API keys cannot fetch workspace-managed configuration. Preserve the
     // existing ChatGPT bootstrap identity even when model requests allow
     // CODEX_API_KEY.
@@ -456,6 +498,27 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         /*enable_codex_api_key_env*/ false,
     )
     .await?;
+    if let Some(worktree) = managed_worktree.as_ref() {
+        // Destination auth can fetch source policy that the host bootstrap could not.
+        let source_config = ConfigBuilder::default()
+            .codex_home(codex_home.to_path_buf())
+            .cli_overrides(cli_kv_overrides.clone())
+            .loader_overrides(LoaderOverrides {
+                ignore_project_config: true,
+                ..loader_overrides.clone()
+            })
+            .fallback_cwd(Some(worktree.source_cwd.clone()))
+            .strict_config(strict_config)
+            .cloud_config_bundle(cloud_config_bundle.clone())
+            .build()
+            .await?;
+        if source_config.active_project.is_untrusted() {
+            anyhow::bail!(
+                "--worktree requires a source that is not explicitly untrusted; unused checkout at {} remains. Remove it manually with `git worktree remove` when safe",
+                worktree.checkout.display()
+            );
+        }
+    }
     let run_cli_overrides = cli_kv_overrides.clone();
     let run_loader_overrides = loader_overrides.clone();
     let run_cloud_config_bundle = cloud_config_bundle.clone();
@@ -545,12 +608,13 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             .cloud_config_bundle(cloud_config_bundle.clone())
             .build()
     };
-    let config = build_exec_config(
+    let mut config = build_exec_config(
         overrides,
         dangerously_bypass_approvals_and_sandbox,
         build_config,
     )
     .await?;
+    embedded_network_policy.activate(&mut config);
     let resume_approvals_reviewer_override = cli_kv_overrides
         .iter()
         .any(|(key, _)| key == "approvals_reviewer")
@@ -622,7 +686,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             range: None,
         })
         .collect();
-    let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
+    let local_runtime_paths = ExecServerRuntimeOptions::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
@@ -632,13 +696,16 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     );
     let state_db = codex_core::init_state_db(&config).await;
     let environment_manager = if run_loader_overrides.ignore_user_config {
-        EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory())
-            .await?
+        EnvironmentManager::from_env(
+            Some(local_runtime_paths),
+            embedded_network_policy.bind(config.http_client_factory()),
+        )
+        .await?
     } else {
         EnvironmentManager::from_codex_home(
             config.codex_home.clone(),
             Some(local_runtime_paths),
-            config.http_client_factory(),
+            embedded_network_policy.bind(config.http_client_factory()),
         )
         .await?
     };
@@ -649,6 +716,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         loader_overrides: run_loader_overrides,
         strict_config,
         cloud_config_bundle: run_cloud_config_bundle,
+        embedded_network_policy,
         feedback: CodexFeedback::new(),
         log_db: None,
         state_db: state_db.clone(),
@@ -1084,8 +1152,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 ClientRequest::TurnStart {
                     request_id: request_ids.next(),
                     params: TurnStartParams {
+                        disabled_plugin_ids: None,
                         thread_id: primary_thread_id_for_span.clone(),
-                        turn_trigger: None,
+                        turn_trigger: Some("exec".to_string()),
                         client_user_message_id: None,
                         input: items.into_iter().map(Into::into).collect(),
                         tool_output: None,

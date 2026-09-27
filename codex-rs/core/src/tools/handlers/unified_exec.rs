@@ -1,7 +1,7 @@
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
 use crate::shell::ShellType;
-use crate::shell::get_shell_by_model_provided_path;
+use crate::shell::resolve_requested_shell;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -117,7 +117,8 @@ pub(crate) fn get_command(
             let model_shell = args
                 .shell
                 .as_ref()
-                .map(|shell_str| get_shell_by_model_provided_path(&PathBuf::from(shell_str)));
+                .map(|shell_str| resolve_requested_shell(&PathBuf::from(shell_str)))
+                .transpose()?;
             let shell = model_shell.as_ref().unwrap_or(session_shell.as_ref());
             Ok(ResolvedCommand {
                 command: shell.derive_exec_args(&args.cmd, use_login_shell),

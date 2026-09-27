@@ -1,7 +1,4 @@
 use super::*;
-use crate::request::EncodedJsonBody;
-use crate::request::RequestCompression;
-use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::io::Write;
 use std::sync::Arc;
@@ -21,43 +18,27 @@ async fn enabled_request_logging_emits_transport_url_and_body() {
 
 #[tokio::test]
 async fn disabled_request_logging_suppresses_transport_url_and_body() {
-    let logs = capture_transport_logs(HttpClient::new_without_request_logging(
-        test_reqwest_client(),
-    ))
-    .await;
+    let logs =
+        capture_transport_logs(HttpClient::new(test_reqwest_client()).without_request_logging())
+            .await;
 
     assert!(logs.contains("log capture sentinel"));
     assert!(!logs.contains("url-secret"));
     assert!(!logs.contains("body-secret"));
-}
 
-#[test]
-fn sensitive_encoded_body_stays_redacted_after_preparation_and_retries() {
-    let payload = json!({"client_metadata": {"guardian_ticket": "secret-receipt"}});
-    for compression in [RequestCompression::None, RequestCompression::Zstd] {
-        let mut request = Request::new(Method::POST, "https://example.com/responses".into())
-            .with_compression(compression);
-        request.body = Some(RequestBody::EncodedJson(
-            EncodedJsonBody::encode(&payload)
-                .unwrap()
-                .without_body_logging(),
-        ));
-        assert_eq!(request_body_for_trace(&request), "<redacted>");
-        for _ in 0..2 {
-            request = request.clone().into_prepared().unwrap();
-            assert_eq!(request_body_for_trace(&request), "<redacted>");
-            assert!(!format!("{request:?}").contains("secret-receipt"));
-            let body = request.prepare_body_for_send().unwrap().body.unwrap();
-            let decoded = match compression {
-                RequestCompression::None => body.to_vec(),
-                RequestCompression::Zstd => zstd::stream::decode_all(body.as_ref()).unwrap(),
-            };
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(),
-                payload
-            );
-        }
-    }
+    let controller = crate::NetworkPolicyController::default();
+    let policy = controller.policy();
+    controller.publish(policy.revision(), crate::DestinationPolicy::Unrestricted);
+    let factory = crate::HttpClientFactory::new(crate::OutboundProxyPolicy::ReqwestDefault)
+        .with_network_policy(policy);
+    let client =
+        crate::RouteAwareClientPool::new(factory, crate::ClientRouteClass::Api).into_client();
+    let logs = capture_transport_logs(client.clone()).await;
+    assert!(logs.contains("url-secret"));
+    let logs = capture_transport_logs(client.clone().without_request_logging()).await;
+    assert!(!logs.contains("url-secret"), "{logs}");
+    assert!(!logs.contains("body-secret"));
+    assert!(capture_transport_logs(client).await.contains("url-secret"));
 }
 
 #[tokio::test]
@@ -105,7 +86,8 @@ async fn capture_transport_logs(client: HttpClient) -> String {
             .with_writer(move || TestLogWriter(Arc::clone(&writer_buffer)))
             .with_filter(
                 tracing_subscriber::filter::Targets::new()
-                    .with_target("codex_http_client::transport", tracing::Level::TRACE),
+                    .with_target("codex_http_client::transport", tracing::Level::TRACE)
+                    .with_target("codex_http_client::client", tracing::Level::DEBUG),
             ),
     );
     let _guard = tracing::subscriber::set_default(subscriber);
