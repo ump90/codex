@@ -30,9 +30,6 @@ fn retained_guidance_is_not_injected_again() {
     world_state.add_section(GitBashFileLinkInstructionsState::new(/*enabled*/ true));
     let retained: ResponseItem = ContextualUserFragment::into(GitBashFileLinkInstructions);
 
-    assert!(
-        world_state
-            .render_history_diff(/*previous*/ None, &[retained])
-            .is_empty()
-    );
+    let (_, fragments) = world_state.render_history_diff(/*previous*/ None, &[retained]);
+    assert!(fragments.is_empty());
 }

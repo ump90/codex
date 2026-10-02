@@ -1,4 +1,5 @@
 use super::PreviousSectionState;
+use super::SectionTransition;
 use super::WorldStateSection;
 use crate::context::ContextualUserFragment;
 use crate::context::GitBashFileLinkInstructions;
@@ -19,10 +20,6 @@ impl WorldStateSection for GitBashFileLinkInstructionsState {
     const ID: &'static str = "git_bash_file_link_instructions";
     type Snapshot = bool;
 
-    fn snapshot(&self) -> Self::Snapshot {
-        self.enabled
-    }
-
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
         role == "developer" && GitBashFileLinkInstructions::matches_text(text)
     }
@@ -38,15 +35,16 @@ impl WorldStateSection for GitBashFileLinkInstructionsState {
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
+    ) -> SectionTransition<Self::Snapshot> {
+        let current = self.enabled;
         if !self.enabled
             || matches!(previous, PreviousSectionState::Known(previous) if *previous)
             || matches!(previous, PreviousSectionState::Unknown)
         {
-            return None;
+            return (Some(current), None);
         }
 
-        Some(Box::new(GitBashFileLinkInstructions))
+        (Some(current), Some(Box::new(GitBashFileLinkInstructions)))
     }
 }
 
