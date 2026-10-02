@@ -6,7 +6,7 @@
 
 ## 分支职责
 
-- `main` 跟踪 `openai/codex:main`。
+- `main` 同步 `openai/codex` 按发布时间最新的 Codex release tag，包含 Pre-release；不再同步尚未发布的 main 提交。
 - `codex/fork-release` 承载 Windows Git Bash 和 Windows 便携发布相关功能。
 - 上游同步只更新 `main`。合并到 `codex/fork-release` 时，以主线当前实现
   为基础，恢复并验证下表中的二开行为。

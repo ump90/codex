@@ -7,10 +7,6 @@ on:
         description: "Repository to sync from."
         required: true
         default: "openai/codex"
-      upstream_branch:
-        description: "Branch to sync from."
-        required: true
-        default: "main"
       target_branch:
         description: "Branch to update in this repository."
         required: true
@@ -28,12 +24,12 @@ permissions:
 
 jobs:
   sync:
-    name: Merge upstream into ${{ inputs.target_branch || 'main' }}
+    name: Merge latest upstream release into ${{ inputs.target_branch || 'main' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ inputs.target_branch || 'main' }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
@@ -43,24 +39,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Merge upstream branch
+      - name: Merge latest published upstream release (including prereleases)
         env:
           UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository || 'openai/codex' }}
-          UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'main' }}
           TARGET_BRANCH: ${{ inputs.target_branch || 'main' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
+          # Keep the workflow's helper when switching to the upstream mirror,
+          # which may not contain fork-only scripts yet.
+          cp .github/scripts/sync_upstream_release.py "${RUNNER_TEMP}/sync_upstream_release.py"
           git fetch origin "${TARGET_BRANCH}"
           git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
 
-          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
-          git fetch upstream "${UPSTREAM_BRANCH}"
-
-          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" HEAD; then
-            echo "${TARGET_BRANCH} already contains upstream/${UPSTREAM_BRANCH}."
-            exit 0
-          fi
-
-          git merge --no-edit "upstream/${UPSTREAM_BRANCH}"
+          python3 "${RUNNER_TEMP}/sync_upstream_release.py" --repository "${UPSTREAM_REPOSITORY}"
           git push origin "HEAD:${TARGET_BRANCH}"
