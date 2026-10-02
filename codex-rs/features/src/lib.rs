@@ -211,6 +211,10 @@ pub enum Feature {
     Collab,
     /// Enable task-path-based multi-agent routing.
     MultiAgentV2,
+    /// Keep spawn model choices in append-only context instead of tool descriptions.
+    ModelCatalogInContext,
+    /// Inherit client-defined dynamic tools in fresh V2 subagents.
+    MultiAgentV2DynamicTools,
     /// Keep sampling through reasoning and commentary boundaries when agent mail arrives.
     /// Pending mail is delivered at the next normal input boundary instead.
     DeferMailboxPreemption,
@@ -262,6 +266,11 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppBrowser,
+    /// Allow websites to open and customize annotation tools in desktop apps.
+    /// Ordinary user-driven annotation is independent of this gate.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    BrowserAnnotationApi,
     /// Allow the in-app chat pane in desktop apps.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -270,6 +279,11 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppDictation,
+    /// Allow in-app Voice in desktop apps.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    /// Permission does not establish Voice availability or provider support.
+    InAppVoice,
     /// Allow desktop apps to run local automations.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -345,6 +359,8 @@ pub enum Feature {
     GuardianConversationHistoryTools,
     /// Enable Guardian V2 automatic approval reviews.
     GuardianV2,
+    /// Run Decisions alongside Guardian V2 for measurement without changing approvals.
+    GuardianV2DecisionsComparison,
     /// Removed compatibility flag for the unused Guardian extension prototype.
     GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
@@ -1299,8 +1315,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ApiKeyModelDiscovery,
         key: "api_key_model_discovery",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ApiKeyCyberAccessPrograms,
@@ -1358,6 +1374,18 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::MultiAgentV2,
         key: "multi_agent_v2",
         stage: Stage::Stable,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ModelCatalogInContext,
+        key: "model_catalog_in_context",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::MultiAgentV2DynamicTools,
+        key: "multi_agent_v2_dynamic_tools",
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1505,6 +1533,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::BrowserAnnotationApi,
+        key: "browser_annotation_api",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::InAppChat,
         key: "in_app_chat",
         stage: Stage::Stable,
@@ -1513,6 +1547,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::InAppDictation,
         key: "in_app_dictation",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::InAppVoice,
+        key: "in_app_voice",
         stage: Stage::Stable,
         default_enabled: true,
     },
@@ -1711,6 +1751,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianV2,
         key: "guardianv2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianV2DecisionsComparison,
+        key: "guardianv2_decisions_comparison",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
