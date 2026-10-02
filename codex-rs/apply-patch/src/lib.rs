@@ -75,7 +75,15 @@ pub(crate) fn resolve_patch_path(
 ) -> Result<PathUri, PathUriParseError> {
     let normalized = match (path_syntax, cwd.infer_path_convention()) {
         (ApplyPatchPathSyntax::GitBash, Some(PathConvention::Windows)) => {
-            git_bash_path_to_windows_path(path)
+            match git_bash_path_to_windows_path(path) {
+                Some(path) => Some(path),
+                None if path.starts_with('/') => {
+                    return Err(PathUriParseError::InvalidFileUriPath {
+                        path: path.to_string(),
+                    });
+                }
+                None => None,
+            }
         }
         (
             ApplyPatchPathSyntax::Native,
@@ -1001,6 +1009,34 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn git_bash_virtual_absolute_paths_are_rejected() {
+        let cwd = PathUri::parse("file:///C:/workspace").expect("valid Windows cwd URI");
+
+        for path in ["/usr/bin", "/tmp/output.txt"] {
+            assert_eq!(
+                resolve_patch_path(&cwd, path, ApplyPatchPathSyntax::GitBash),
+                Err(PathUriParseError::InvalidFileUriPath {
+                    path: path.to_string(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn git_bash_known_absolute_and_relative_paths_are_resolved() {
+        let cwd = PathUri::parse("file:///C:/workspace").expect("valid Windows cwd URI");
+
+        assert_eq!(
+            resolve_patch_path(&cwd, "/c/project/file.txt", ApplyPatchPathSyntax::GitBash),
+            Ok(PathUri::parse("file:///C:/project/file.txt").unwrap())
+        );
+        assert_eq!(
+            resolve_patch_path(&cwd, "src/file.txt", ApplyPatchPathSyntax::GitBash),
+            Ok(PathUri::parse("file:///C:/workspace/src/file.txt").unwrap())
+        );
+    }
 
     /// Helper to construct a patch with the given body.
     fn wrap_patch(body: &str) -> String {
