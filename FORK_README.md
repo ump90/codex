@@ -11,6 +11,13 @@
 - 上游同步只更新 `main`。合并到 `codex/fork-release` 时，以主线当前实现
   为基础，恢复并验证下表中的二开行为。
 
+## 上游同步凭据
+
+`.github/workflows/sync-upstream.yml` 会把上游 release 中的 workflow 文件一并
+同步到 `main`。由于 `GITHUB_TOKEN` 不能推送 workflow 文件，仓库必须配置名为
+`SYNC_UPSTREAM_TOKEN` 的 PAT secret，并授予该仓库 `Contents: Read and write`
+和 `Workflows: Read and write` 权限。未配置时，工作流会在开始前明确失败。
+
 ## 合并时需要复核的功能
 
 | 功能 | 合并后必须确认的行为 | 主要位置 |
