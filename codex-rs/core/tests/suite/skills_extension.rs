@@ -3062,6 +3062,10 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
             model_info.max_context_window = None;
         })
         .with_config(|config| {
+            config
+                .features
+                .enable(Feature::StableEnvironmentTools)
+                .expect("enable stable environment tools");
             configure_catalog_test(config);
             config.cloud_skill_enabled = true;
             config.model_provider.name = "Skills compaction test".to_string();
@@ -3232,17 +3236,8 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
             _ => None,
         })
         .expect("compaction retains an allocation checkpoint");
-    let allocation = checkpoint.state["cloud_skills"]["allocation"]
-        .as_object()
-        .expect("retained allocation");
-    assert_eq!(
-        serde_json::to_value(checkpoint)?,
-        json!({
-            "full": true,
-            "state": { "cloud_skills": { "allocation": allocation } },
-        }),
-        "compaction retains only allocation metadata, not rendered catalogs",
-    );
+    assert!(checkpoint.full);
+    assert!(checkpoint.state["cloud_skills"]["allocation"].is_object());
     let resumed = test
         .thread_manager
         .start_thread(StartThreadOptions {
@@ -3333,7 +3328,7 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
                 .flat_map(|text| text.lines())
                 .filter(|line| line.starts_with("- exec-"))
                 .collect::<Vec<_>>(),
-            if matches!(index, 0 | 4) {
+            if index == 0 {
                 Vec::new()
             } else {
                 ready_executor_lines.clone()
@@ -3354,7 +3349,7 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
             "cloud_skills_across_executor_readiness"
         },
         context_snapshot::format_request_history_snapshot(
-            "Cloud skills rebalance once to retain every executor skill. Post-turn compaction and resume restore the same cloud allocation before the executor reconnects; both catalogs are fully reinjected once into the new history.",
+            "Cloud skills rebalance once to retain every executor skill. Post-turn compaction installs both catalogs and their allocation before resume; the saved catalogs remain visible while the executor reconnects.",
             &requests,
             &ContextSnapshotOptions::default()
                 .rewrite_known_segments()
