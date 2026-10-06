@@ -207,6 +207,7 @@ pub struct TurnResolvedConfigFact {
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,
     pub guardian_v2_enabled: bool,
+    pub multi_agent_version: codex_protocol::protocol::MultiAgentVersion,
     pub sandbox_network_access: bool,
     pub collaboration_mode: ModeKind,
     pub personality: Option<Personality>,
@@ -443,6 +444,7 @@ pub struct SubAgentThreadStartedInput {
     pub ephemeral: bool,
     pub thread_source: Option<ThreadSource>,
     pub subagent_source: SubAgentSource,
+    pub initialization_mode: ThreadInitializationMode,
     pub created_at: u64,
 }
 

@@ -816,6 +816,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
         .expect("expected turn aborted event")
         .expect("channel open");
     let EventMsg::TurnAborted(TurnAbortedEvent {
+        root_turn_id,
         turn_id,
         reason,
         error: _,
@@ -826,6 +827,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     else {
         panic!("expected turn aborted event");
     };
+    assert_eq!(root_turn_id, Some(tc.root_turn_id()));
     assert_eq!(turn_id, Some(tc.sub_id.clone()));
     assert_eq!(reason, TurnAbortReason::Interrupted);
     assert!(started_at.is_some());
@@ -4338,6 +4340,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let rollout_items = vec![
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
+                turn_attribution: None,
                 turn_id: turn_id.clone(),
                 root_turn_id: None,
                 trace_id: None,
@@ -4359,6 +4362,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         RolloutItem::TurnContext(previous_context_item.clone()),
         RolloutItem::EventMsg(EventMsg::TurnComplete(
             codex_protocol::protocol::TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id,
                 last_agent_message: None,
                 error: None,
@@ -4703,7 +4707,7 @@ async fn turn_context_with_model_updates_model_fields() {
         *settings = ResolvedStepSettings::new(
             Arc::new(selected),
             Arc::clone(&settings.model_info),
-            /*fast_mode_enabled*/ true,
+            &codex_features::Features::with_defaults(),
         );
     });
     Arc::make_mut(&mut turn_context.config).service_tier =
@@ -4719,7 +4723,7 @@ async fn turn_context_with_model_updates_model_fields() {
     let current = Arc::new(ResolvedStepSettings::new(
         Arc::new(current_selection),
         Arc::clone(turn_context.model_info()),
-        /*fast_mode_enabled*/ true,
+        &codex_features::Features::with_defaults(),
     ));
     turn_context.next_step_settings.store(Arc::clone(&current));
     let updated = turn_context
@@ -4968,7 +4972,7 @@ fn get_service_tier_does_not_use_model_default_when_absent_and_fast_mode_enabled
     assert_eq!(
         get_service_tier(
             /*configured_service_tier*/ None,
-            /*fast_mode_enabled*/ true,
+            &codex_features::Features::with_defaults(),
             &model_info,
         ),
         None
@@ -4982,7 +4986,7 @@ fn get_service_tier_does_not_use_model_default_when_fast_mode_disabled() {
     assert_eq!(
         get_service_tier(
             /*configured_service_tier*/ None,
-            /*fast_mode_enabled*/ false,
+            &codex_features::Features::default(),
             &model_info,
         ),
         None
@@ -4996,7 +5000,7 @@ fn get_service_tier_keeps_supported_explicit_tier() {
     assert_eq!(
         get_service_tier(
             Some(ServiceTier::Fast.request_value().to_string()),
-            /*fast_mode_enabled*/ true,
+            &codex_features::Features::with_defaults(),
             &model_info,
         ),
         Some(ServiceTier::Fast.request_value().to_string())
@@ -5010,7 +5014,7 @@ fn get_service_tier_does_not_default_when_model_has_no_default() {
     assert_eq!(
         get_service_tier(
             /*configured_service_tier*/ None,
-            /*fast_mode_enabled*/ true,
+            &codex_features::Features::with_defaults(),
             &model_info,
         ),
         None
@@ -5024,7 +5028,7 @@ fn get_service_tier_drops_unsupported_configured_tier_when_fast_mode_enabled() {
     assert_eq!(
         get_service_tier(
             Some("unsupported".to_string()),
-            /*fast_mode_enabled*/ true,
+            &codex_features::Features::with_defaults(),
             &model_info,
         ),
         None
@@ -5032,7 +5036,7 @@ fn get_service_tier_drops_unsupported_configured_tier_when_fast_mode_enabled() {
     assert_eq!(
         get_service_tier(
             Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string()),
-            /*fast_mode_enabled*/ true,
+            &codex_features::Features::with_defaults(),
             &model_info,
         ),
         Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string())
@@ -5043,10 +5047,12 @@ fn get_service_tier_drops_unsupported_configured_tier_when_fast_mode_enabled() {
 fn get_service_tier_preserves_flex_without_catalog_support_or_fast_mode() {
     let model_info = model_with_default_service_tier(/*default_service_tier*/ None);
     for fast_mode_enabled in [false, true] {
+        let mut features = codex_features::Features::with_defaults();
+        features.set_enabled(Feature::FastMode, fast_mode_enabled);
         assert_eq!(
             get_service_tier(
                 Some(ServiceTier::Flex.request_value().to_string()),
-                fast_mode_enabled,
+                &features,
                 &model_info,
             ),
             Some(ServiceTier::Flex.request_value().to_string())
@@ -5061,7 +5067,7 @@ fn get_service_tier_ignores_non_flex_tiers_when_fast_mode_disabled() {
     assert_eq!(
         get_service_tier(
             Some(ServiceTier::Fast.request_value().to_string()),
-            /*fast_mode_enabled*/ false,
+            &codex_features::Features::default(),
             &model_info,
         ),
         None
@@ -5069,7 +5075,7 @@ fn get_service_tier_ignores_non_flex_tiers_when_fast_mode_disabled() {
     assert_eq!(
         get_service_tier(
             Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string()),
-            /*fast_mode_enabled*/ false,
+            &codex_features::Features::default(),
             &model_info,
         ),
         None
@@ -5077,7 +5083,7 @@ fn get_service_tier_ignores_non_flex_tiers_when_fast_mode_disabled() {
     assert_eq!(
         get_service_tier(
             Some("unsupported".to_string()),
-            /*fast_mode_enabled*/ false,
+            &codex_features::Features::default(),
             &model_info,
         ),
         None
@@ -5085,7 +5091,7 @@ fn get_service_tier_ignores_non_flex_tiers_when_fast_mode_disabled() {
     assert_eq!(
         get_service_tier(
             /*configured_service_tier*/ None,
-            /*fast_mode_enabled*/ false,
+            &codex_features::Features::default(),
             &model_info,
         ),
         None
@@ -5243,6 +5249,7 @@ async fn emit_subagent_session_started_includes_fork_lineage_and_originator() {
         Some(parent_thread_id),
         session_configuration.thread_config_snapshot(Vec::new()),
         SubAgentSource::Other(crate::guardian::GUARDIAN_REVIEWER_NAME.to_string()),
+        /*resumed_created_at*/ None,
     );
 
     let event = timeout(Duration::from_secs(1), async {
@@ -5266,6 +5273,7 @@ async fn emit_subagent_session_started_includes_fork_lineage_and_originator() {
     .await
     .expect("subagent initialization analytics should be emitted");
 
+    assert_eq!(event["event_params"]["initialization_mode"], "new");
     assert_eq!(event["event_params"]["thread_source"], "guardian_review");
     assert_eq!(
         event["event_params"]["parent_thread_id"],
@@ -5292,6 +5300,7 @@ async fn emit_subagent_session_started_includes_fork_lineage_and_originator() {
         Some(parent_thread_id),
         session_configuration.thread_config_snapshot(Vec::new()),
         SubAgentSource::Other(crate::guardian::GUARDIAN_REVIEWER_NAME.to_string()),
+        /*resumed_created_at*/ None,
     );
     // Archive analytics exposes retained lineage even before a parent connection exists.
     analytics_events_client.track_notification(&ServerNotification::ThreadArchived(
@@ -6129,6 +6138,18 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     let (mut session, turn_context) = make_session_and_context().await;
     let rollout_path = attach_thread_persistence(&mut session).await;
     let turn_context = Arc::new(turn_context);
+    turn_context
+        .turn_metadata_state
+        .set_turn_trigger("automation".to_string());
+    turn_context
+        .turn_metadata_state
+        .set_parent_turn_id("parent-turn".to_string());
+    turn_context
+        .turn_metadata_state
+        .set_root_turn_id("root-turn".to_string());
+    turn_context.turn_metadata_state.set_initiating_agent_path(
+        codex_protocol::AgentPath::try_from("/root/requester").expect("requester path"),
+    );
     let turn_context_baseline = turn_context.to_turn_context_item();
     let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
     let previous_turn_settings = PreviousTurnSettings {
@@ -6141,11 +6162,19 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
         .set_previous_turn_settings(Some(previous_turn_settings.clone()))
         .await;
 
-    session.state.lock().await.last_started_turn_id = Some("checkpoint-turn".into());
     session.multi_agent_version = std::sync::OnceLock::from(MultiAgentVersion::V2);
     let expected = CompactionResumeMetadata {
         multi_agent_version: Some(MultiAgentVersion::V2),
-        last_started_turn_id: Some("checkpoint-turn".into()),
+        last_started_turn_id: Some(turn_context.sub_id.clone()),
+        turn_attribution: Some(codex_history::TurnAttribution {
+            turn_id: turn_context.sub_id.clone(),
+            turn_trigger: Some("automation".to_string()),
+            parent_turn_id: Some("parent-turn".to_string()),
+            initiating_agent_path: Some(
+                codex_protocol::AgentPath::try_from("/root/requester").expect("requester path"),
+            ),
+            root_turn_id: turn_context_baseline.root_turn_id.clone(),
+        }),
         previous_turn_settings: Some(previous_turn_settings),
     };
     let expected_settings = codex_protocol::protocol::ThreadSettingsAppliedEvent {
@@ -6153,6 +6182,21 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
         thread_settings: session.thread_settings_snapshot().await,
     };
 
+    session
+        .record_started_turn(&turn_context.sub_id, Some(turn_context.attribution()))
+        .await;
+    let compact_context = session.new_default_turn().await;
+    session
+        .record_started_turn(&compact_context.sub_id, /*attribution*/ None)
+        .await;
+    assert_eq!(
+        session.state.lock().await.turn_attribution,
+        expected.turn_attribution
+    );
+
+    session
+        .record_started_turn(&turn_context.sub_id, Some(turn_context.attribution()))
+        .await;
     let input_goal_ids =
         crate::context::UserGoalUpdate::message_ids(session.clone_history().await.raw_items());
     // The goal edit is accepted after the compaction input was captured.
@@ -6212,6 +6256,59 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     );
     assert_eq!(saved_turn_context, &turn_context_baseline);
     assert_eq!(saved_settings, &expected_settings);
+    for same_turn_input in [false, true] {
+        let mut rollback_items = vec![RolloutItem::Compacted(compacted.clone())];
+        if same_turn_input {
+            rollback_items.push(RolloutItem::ResponseItem(
+                user_message("steered work").into(),
+            ));
+        }
+        rollback_items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+        )));
+        let rolled_back = session
+            .reconstruct_history_from_rollout(&turn_context, &rollback_items)
+            .await;
+        assert_eq!(rolled_back.turn_attribution, None);
+    }
+
+    // Settings invalidate continuation eligibility; standalone compaction replaces its ID.
+    // Neither changes the regular work whose attribution the checkpoint preserves.
+    for last_started_turn_id in [None, Some("compact-turn".to_string())] {
+        let mut checkpoint = compacted.clone();
+        checkpoint
+            .resume_metadata
+            .as_mut()
+            .expect("resume metadata")
+            .last_started_turn_id = last_started_turn_id.clone();
+        let mut items = vec![RolloutItem::Compacted(checkpoint)];
+        if let Some(turn_id) = last_started_turn_id {
+            items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
+                TurnCompleteEvent {
+                    root_turn_id: None,
+                    turn_id,
+                    last_agent_message: None,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                },
+            )));
+        }
+        let reconstructed = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(reconstructed.turn_attribution, expected.turn_attribution);
+        assert_eq!(reconstructed.reference_context_item, None);
+        items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+        )));
+        let rolled_back = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(rolled_back.turn_attribution, None);
+    }
 }
 
 #[tokio::test]
@@ -6654,10 +6751,10 @@ async fn build_initial_context(
         .build_world_state_for_step(&step_context)
         .await
         .expect("world state should build");
-    session
+    let (updates, _) = session
         .build_initial_context_with_world_state(&step_context, &world_state)
-        .await
-        .0
+        .await;
+    crate::context_manager::updates::merge_world_state_updates(updates)
 }
 
 pub(crate) async fn build_world_state_from_turn_context(
@@ -7033,7 +7130,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         Arc::new(super::step_settings::ResolvedStepSettings::new(
             Arc::clone(&session_configuration.step_settings),
             Arc::new(model_info),
-            config.features.enabled(Feature::FastMode),
+            &config.features,
         )),
         &models_manager,
         /*network*/ None,
@@ -9299,7 +9396,7 @@ where
         Arc::new(super::step_settings::ResolvedStepSettings::new(
             Arc::clone(&session_configuration.step_settings),
             Arc::new(model_info),
-            config.features.enabled(Feature::FastMode),
+            &config.features,
         )),
         &models_manager,
         /*network*/ None,
@@ -10568,6 +10665,8 @@ async fn build_initial_context_reuses_in_flight_recommendation_prewarm() {
     assert!(futures::poll!(initial_context.as_mut()).is_pending());
 
     let (_, (initial_context, _)) = tokio::join!(prewarm, initial_context);
+    let initial_context =
+        crate::context_manager::updates::merge_world_state_updates(initial_context);
     assert_eq!(
         developer_input_texts(&initial_context)
             .into_iter()
@@ -11283,7 +11382,6 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         model_info.max_context_window = None;
         let messages = model_info.model_messages.as_mut().unwrap();
         messages.instructions_template = Some("A instructions".to_string());
-        messages.instructions_variables = None;
     });
     session
         .set_previous_turn_settings(Some(PreviousTurnSettings {
@@ -11298,8 +11396,13 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .await
         .unwrap();
     let world_a = Arc::new(session.build_world_state_for_step(&step_a).await.unwrap());
-    let (initial_a, _) =
-        crate::compact::build_compaction_initial_context(&session, &step_a, &world_a).await;
+    let (initial_a, _) = crate::compact::build_compaction_replacement_history(
+        &session,
+        &step_a,
+        &world_a,
+        Vec::new(),
+    )
+    .await;
 
     let mut selected_b = step_a.settings.selected().clone();
     selected_b.collaboration_mode.settings.model = "model-b".to_string();
@@ -11317,7 +11420,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .store(Arc::new(ResolvedStepSettings::new(
             Arc::new(selected_b),
             Arc::new(model_b),
-            /*fast_mode_enabled*/ false,
+            &codex_features::Features::default(),
         )));
     let step_b = session
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
@@ -11328,15 +11431,21 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .build_initial_context_with_world_state(&step_b, &world_b)
         .await
         .0;
+    let initial_b = crate::context_manager::updates::merge_world_state_updates(initial_b);
     let turn_contributions_b = session.build_turn_context_contribution_items(&step_b).await;
-    let (restored_a, restored_snapshot) =
-        crate::compact::build_compaction_initial_context(&session, &step_a, &world_a).await;
+    let (restored_a, restored_snapshot) = crate::compact::build_compaction_replacement_history(
+        &session,
+        &step_a,
+        &world_a,
+        Vec::new(),
+    )
+    .await;
 
     assert_eq!(restored_a, initial_a);
     assert_eq!(restored_snapshot, world_a.render_full().0);
     let initial_a = initial_a
         .into_iter()
-        .map(ResponseItemEnvelope::into_item)
+        .map(|item| item.item)
         .collect::<Vec<_>>();
     let a_text = developer_input_texts(&initial_a).join("\n");
     let b_text = developer_input_texts(&initial_b).join("\n");
