@@ -4906,7 +4906,7 @@ class SkillSummary(BaseModel):
     enabled: bool
     interface: SkillInterface | None = None
     name: str
-    path: AbsolutePathBuf | None = None
+    path: LegacyAppPathString | None = None
     short_description: Annotated[str | None, Field(alias="shortDescription")] = None
 
 
@@ -5465,6 +5465,19 @@ class SubAgentActivityThreadItem(BaseModel):
     agent_thread_id: Annotated[str, Field(alias="agentThreadId")]
     id: str
     kind: SubAgentActivityKind
+    model: Annotated[
+        str | None,
+        Field(
+            description="Resolved model at sub-agent creation; absent from older records and other activities."
+        ),
+    ] = None
+    reasoning_effort: Annotated[
+        ReasoningEffort | None,
+        Field(
+            alias="reasoningEffort",
+            description="Resolved reasoning effort at sub-agent creation, when known.",
+        ),
+    ] = None
     type: Annotated[Literal["subAgentActivity"], Field(title="SubAgentActivityThreadItemType")]
 
 
@@ -9781,7 +9794,7 @@ class SkillMetadata(BaseModel):
     enabled: bool
     interface: SkillInterface | None = None
     name: str
-    path: AbsolutePathBuf
+    path: LegacyAppPathString
     plugin_id: Annotated[
         str | None,
         Field(
@@ -10122,6 +10135,13 @@ class ThreadListParams(BaseModel):
         ThreadListCwdFilter | None,
         Field(
             description="Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
+        ),
+    ] = None
+    excluded_thread_ids: Annotated[
+        list[str] | None,
+        Field(
+            alias="excludedThreadIds",
+            description="Thread IDs to exclude before applying the result limit. Up to 100 entries; invalid IDs or a larger list are rejected, never truncated. Send the same exclusions on each page. Omitted, null, or empty means no exclusions.",
         ),
     ] = None
     limit: Annotated[

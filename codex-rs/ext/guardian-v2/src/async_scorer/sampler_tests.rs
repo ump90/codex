@@ -17,6 +17,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_prompts::GuardianClassifierInstructions;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
+use codex_protocol::TranscriptFormat;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -234,6 +235,7 @@ async fn connect_sampler(config: LunaSamplerConfig) -> Result<LunaSampler> {
 
 fn classifier_instructions() -> RenderedFragment {
     GuardianClassifierInstructions::new(
+        TranscriptFormat::Line,
         "Classify using {{ tenant_policy_config }}.",
         "the tenant policy",
         "Return high for high risk or low for low risk.",
@@ -256,6 +258,9 @@ fn assert_classifier_instructions(request: &serde_json::Value) {
             }],
             "internal_chat_message_metadata_passthrough": {
                 "content_item_kinds": ["guardian.classifier_instructions"],
+                "content_item_metadata": [{
+                    "provenance": {"type": "harness", "hook": false},
+                }],
             },
         })
     );

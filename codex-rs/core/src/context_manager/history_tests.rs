@@ -46,6 +46,8 @@ use image::Luma;
 use image::Rgba;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
+use serde_json::from_value;
+use serde_json::json;
 use test_case::test_case;
 
 const EXEC_FORMAT_MAX_BYTES: usize = 10_000;
@@ -714,26 +716,20 @@ fn reference_context_item() -> TurnContextItem {
                 .join("reference-cwd"),
         )
         .expect("absolute reference cwd"),
-        workspace_roots: None,
-        current_date: Some("2026-03-23".to_string()),
-        timezone: Some("America/Los_Angeles".to_string()),
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: None,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         permission_profile: None,
         active_permission_profile: None,
-        network: None,
         file_system_sandbox_policy: None,
         model: "gpt-test".to_string(),
         comp_hash: None,
-        personality: None,
         collaboration_mode: None,
         multi_agent_version: None,
-        multi_agent_mode: None,
         realtime_active: Some(false),
         cyber_access_program: None,
         effort: None,
-        summary: codex_protocol::config_types::ReasoningSummary::Auto,
+        summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     }
 }
 
@@ -1270,6 +1266,10 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
                         ContentItemKind("audio.unsupported".to_string()),
                         ContentItemKind("user.text".to_string()),
                     ]),
+                    content_item_metadata: from_value(json!([
+                        {}, {"harness_injected": true}, {"harness_injected": true}, {}
+                    ]))
+                    .unwrap(),
                     ..Default::default()
                 },
             ),

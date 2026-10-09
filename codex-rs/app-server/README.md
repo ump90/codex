@@ -1,3 +1,24 @@
+# Thread list exclusions
+
+`thread/list` accepts `excludedThreadIds`, an optional array of up to 100
+thread ID strings. Omitted, null, or empty lists do not exclude anything.
+Invalid IDs or more than 100 entries return JSON-RPC error `-32602`;
+duplicates count toward that bound and no entries are silently truncated.
+
+Exclusions apply before the returned result limit, along with the existing
+source, provider, archive, project, section and cwd filters. Pages refill to
+the requested limit (at most 100) unless history is exhausted. Send the same
+exclusions and filters with each returned cursor. Clients that display a saved
+manual order can load those summaries separately, then exclude the entire saved
+ID set when listing the remainder. This field does not save or sort that order.
+
+DB-only requests (`useStateDbOnly: true`) return JSON-RPC error `-32603`
+when the local state DB cannot serve the query, even for an empty cwd filter.
+Listing also returns `-32603` if the store repeats a cursor while filling a page.
+These errors are not evidence that history is exhausted; callers can retry.
+A successful response with `nextCursor: null` still indicates exhaustion.
+Default scan-and-repair requests retain their filesystem fallback.
+
 # Guardian circuit-breaker errors
 
 Set `auto_review.circuit_break_action = "strict"` to include `TooManyDenials` in
@@ -318,6 +339,18 @@ A non-ephemeral fork copies the source thread's current attachments, even when f
 Attachment creation and deletion requests using the same thread ID are serialized across connections. The requesting client receives its response before the compact update is broadcast, and duplicate creates or absent deletes do not emit updates. Deleting the owning thread removes its attachments under the same lifecycle exclusion; queued attachment mutations then report that the thread was not found.
 
 # Thread plugin settings
+
+Plugin summaries returned by `plugin/list`, `plugin/installed`, `plugin/read`,
+and `plugin/share/list` report effective `enabled` state. When
+`plugins._default.enabled` is configured, an explicit
+`plugins."<plugin-name>@<marketplace-name>".enabled` overrides that default;
+a plugin disabled at its source remains disabled. Omitting the default preserves
+existing source and account enablement. Other plugin settings, including remembered
+tool approvals, inherit the activation default unless `enabled` is explicitly set.
+`plugin/search` retains its discovery behavior: results report `enabled: false`
+while preserving their installation state.
+Remote `plugin/install` still installs a policy-disabled package, but skips MCP and
+Apps authentication setup without writing an `enabled` override.
 
 `thread/settings/update` and `turn/start` accept `disabledPluginIds`, a list of
 `PluginSummary.id` values from `plugin/list`, in the
