@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
+import time
 
 
 RELEASE_TAG = re.compile(
@@ -13,6 +15,41 @@ RELEASE_TAG = re.compile(
 )
 WORKSPACE_VERSION = re.compile(r'(?m)^(version\s*=\s*")[^"]+("\s*)$')
 MANIFEST = "codex-rs/Cargo.toml"
+
+
+def release_pages(repository: str) -> list[list[dict]]:
+    command = [
+        "gh", "api", "--paginate", "--slurp",
+        f"repos/{repository}/releases?per_page=100",
+    ]
+    for attempt in range(4):
+        try:
+            # Never parse partial stdout from a failed paginated request.
+            output = subprocess.check_output(
+                command, text=True, encoding="utf-8", stderr=subprocess.PIPE,
+                timeout=300,
+            )
+            return json.loads(output)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            if isinstance(error, subprocess.CalledProcessError):
+                detail = error.stderr or ""
+                print(detail, file=sys.stderr, flush=True)
+                if not re.search(
+                    r"HTTP (?:429|5[0-9]{2})\b|TLS handshake timeout|"
+                    r"i/o timeout|connection reset|unexpected EOF|"
+                    r"temporary failure in name resolution",
+                    detail, re.IGNORECASE,
+                ):
+                    raise
+            if attempt == 3:
+                raise
+            delay = 5 * 2**attempt
+            print(
+                f"GitHub release query failed (attempt {attempt + 1}/4); "
+                f"retrying in {delay}s",
+                file=sys.stderr, flush=True,
+            )
+            time.sleep(delay)
 
 
 def latest_release(pages: list[list[dict]]) -> dict:
@@ -80,19 +117,7 @@ def main() -> None:
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
         parser.error("Expected an owner/repository name")
-    pages = json.loads(
-        subprocess.check_output(
-            [
-                "gh",
-                "api",
-                "--paginate",
-                "--slurp",
-                f"repos/{args.repository}/releases?per_page=100",
-            ],
-            text=True,
-            encoding="utf-8",
-        )
-    )
+    pages = release_pages(args.repository)
     release = latest_release(pages)
     tag = release["tag_name"]
     print(

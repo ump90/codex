@@ -1,8 +1,59 @@
 import tempfile
 import unittest
+import subprocess
+from unittest.mock import patch
 from pathlib import Path
 
 import sync_upstream_release as sync
+
+
+class ReleasePagesTest(unittest.TestCase):
+    def failure(self, status):
+        return subprocess.CalledProcessError(
+            1, ["gh", "api"], output='[[{"partial": true}]]',
+            stderr=f"gh: request failed (HTTP {status})",
+        )
+
+    @patch.object(sync.time, "sleep")
+    @patch.object(sync.subprocess, "check_output")
+    def test_retries_transient_errors_and_discards_partial_response(self, query, sleep):
+        for status in (429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                query.reset_mock()
+                sleep.reset_mock()
+                query.side_effect = [self.failure(status), '[[{"id": 2}]]']
+                self.assertEqual(sync.release_pages("openai/codex"), [[{"id": 2}]])
+                self.assertEqual(query.call_count, 2)
+                sleep.assert_called_once_with(5)
+
+    @patch.object(sync.time, "sleep")
+    @patch.object(sync.subprocess, "check_output")
+    def test_stops_after_four_attempts(self, query, sleep):
+        query.side_effect = self.failure(504)
+        with self.assertRaises(subprocess.CalledProcessError):
+            sync.release_pages("openai/codex")
+        self.assertEqual(query.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 10, 20])
+
+    @patch.object(sync.time, "sleep")
+    @patch.object(sync.subprocess, "check_output")
+    def test_retries_request_timeout(self, query, sleep):
+        query.side_effect = [subprocess.TimeoutExpired(["gh"], 300), "[[]]"]
+        self.assertEqual(sync.release_pages("openai/codex"), [[]])
+        sleep.assert_called_once_with(5)
+        self.assertEqual(query.call_args.kwargs["timeout"], 300)
+
+    @patch.object(sync.time, "sleep")
+    @patch.object(sync.subprocess, "check_output")
+    def test_does_not_retry_permanent_errors(self, query, sleep):
+        for status in (401, 403, 404):
+            with self.subTest(status=status):
+                query.reset_mock()
+                query.side_effect = self.failure(status)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    sync.release_pages("openai/codex")
+                query.assert_called_once()
+        sleep.assert_not_called()
 
 
 class LatestReleaseTest(unittest.TestCase):
