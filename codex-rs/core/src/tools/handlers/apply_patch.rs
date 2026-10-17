@@ -45,7 +45,6 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::windows_sandbox::windows_sandbox_level_for_legacy_checks;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
-use codex_apply_patch::ApplyPatchFileUpdateMode;
 use codex_apply_patch::ApplyPatchPathSyntax;
 use codex_apply_patch::Hunk;
 use codex_apply_patch::StreamingPatchParser;
@@ -74,18 +73,6 @@ pub(crate) fn apply_patch_path_syntax_for_shell(
 }
 
 const APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL: Duration = Duration::from_millis(500);
-
-fn apply_patch_file_update_mode(turn: &TurnContext) -> ApplyPatchFileUpdateMode {
-    if turn
-        .config
-        .features
-        .enabled(Feature::ApplyPatchPreserveLineEndings)
-    {
-        ApplyPatchFileUpdateMode::PreserveLineEndings
-    } else {
-        ApplyPatchFileUpdateMode::NormalizeToLf
-    }
-}
 
 /// Handles freeform `apply_patch` requests and routes verified patches to the
 /// selected environment filesystem.
@@ -332,7 +319,6 @@ impl ApplyPatchHandler {
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         let ToolInvocation {
             session,
-            turn,
             step_context,
             cancellation_token,
             tracker,
@@ -359,15 +345,10 @@ impl ApplyPatchHandler {
             require_environment_id(args.environment_id.as_deref(), self.multi_environment)?;
 
         // Verify the parsed patch against the selected environment filesystem.
-        let Some(turn_environment) = resolve_tool_environment(
+        let turn_environment = resolve_tool_environment(
             &step_context.environments,
             selected_environment_id.as_deref(),
-        )?
-        else {
-            return Err(FunctionCallError::RespondToModel(
-                "apply_patch is unavailable in this session".to_string(),
-            ));
-        };
+        )?;
         let fs = turn_environment.environment.get_filesystem();
         let sandbox = turn_environment.sandbox_context(/*additional_permissions*/ None);
         let session_shell = session.user_shell();
@@ -377,10 +358,9 @@ impl ApplyPatchHandler {
             .map_or(session_shell.shell_type, |shell| shell.shell_type);
         let path_syntax =
             apply_patch_path_syntax_for_shell(Some(shell_type), turn_environment.cwd());
-        match codex_apply_patch::verify_apply_patch_args_with_mode_and_path_syntax(
+        match codex_apply_patch::verify_apply_patch_args_with_path_syntax(
             args,
             turn_environment.cwd(),
-            apply_patch_file_update_mode(&turn),
             path_syntax,
             fs.as_ref(),
             Some(&sandbox),
@@ -486,16 +466,9 @@ pub(crate) async fn intercept_apply_patch(
     call_id: &str,
     tool_name: &str,
 ) -> Result<Option<FunctionToolOutput>, FunctionCallError> {
-    let turn = &step_context.turn;
     let sandbox = turn_environment.sandbox_context(/*additional_permissions*/ None);
-    match codex_apply_patch::maybe_parse_apply_patch_verified_with_mode(
-        command,
-        cwd,
-        apply_patch_file_update_mode(turn),
-        fs,
-        Some(&sandbox),
-    )
-    .await
+    match codex_apply_patch::maybe_parse_apply_patch_verified(command, cwd, fs, Some(&sandbox))
+        .await
     {
         codex_apply_patch::MaybeApplyPatchVerified::Body(changes) => {
             let tool_ctx = ToolCtx {

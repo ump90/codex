@@ -4,6 +4,7 @@ use crate::HostSkillsSnapshot;
 use crate::InjectedHostSkillPrompts;
 use codex_analytics::InvocationType;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
+use codex_exec_server::ExecutorCapabilityDiscoveryV2Snapshot;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::ResolvedSelectedCapabilityRoot;
 use codex_extension_api::ConfigContributor;
@@ -16,6 +17,7 @@ use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::PromptFragment;
+use codex_extension_api::PromptSlot;
 use codex_extension_api::SelectedPluginSnapshot;
 use codex_extension_api::SkillInvocationContributor;
 use codex_extension_api::SkillInvocationInput;
@@ -71,7 +73,6 @@ use crate::tools::SkillAnalytics;
 use crate::tools::SkillToolAuthority;
 use crate::tools::skill_tools;
 use crate::warnings::bounded_warnings;
-use crate::world_state::CLOUD_SKILLS_WORLD_STATE_ID;
 use crate::world_state_catalogs::CatalogContext;
 use crate::world_state_catalogs::CatalogStatus;
 
@@ -211,6 +212,7 @@ where
                             .get::<SkillsSessionState>()
                             .and_then(|state| state.mcp_resources.clone()),
                         executor_capability_discovery: None,
+                        executor_capability_discovery_v2: Vec::new(),
                     },
                     &thread_state,
                 )
@@ -238,7 +240,7 @@ where
             rendered
                 .fragment
                 .map(|fragment| {
-                    PromptFragment::developer_capability(fragment.render(), fragment.content_kind())
+                    PromptFragment::from_fragment(PromptSlot::DeveloperCapabilities, &fragment)
                 })
                 .into_iter()
                 .collect()
@@ -264,25 +266,6 @@ where
                 .map(|catalog| context.build_world_state_section(catalog))
                 .collect()
         })
-    }
-
-    fn retain_world_state_after_compaction(
-        &self,
-        previous_world_state: &serde_json::Map<String, serde_json::Value>,
-    ) -> serde_json::Map<String, serde_json::Value> {
-        let mut retained = serde_json::Map::new();
-        if let Some(allocation) = previous_world_state
-            .get(CLOUD_SKILLS_WORLD_STATE_ID)
-            .and_then(|section| section.get("allocation"))
-        {
-            // Allocation survives lost history; the catalog fingerprint and budget still
-            // determine whether it can be reused after fresh discovery and policy resolution.
-            retained.insert(
-                CLOUD_SKILLS_WORLD_STATE_ID.to_string(),
-                serde_json::json!({ "allocation": allocation }),
-            );
-        }
-        retained
     }
 }
 
@@ -328,6 +311,10 @@ where
             executor_capability_discovery: step_store
                 .get::<ExecutorCapabilityDiscoverySnapshot>()
                 .map(|discovery| discovery.as_ref().clone()),
+            executor_capability_discovery_v2: step_store
+                .get::<Vec<ExecutorCapabilityDiscoveryV2Snapshot>>()
+                .map(|discovery| discovery.as_ref().clone())
+                .unwrap_or_default(),
         });
         self.build_skill_tools(
             session_store,
@@ -402,6 +389,7 @@ where
                 include_cloud_skills: thread_state.cloud_skill_enabled(),
                 mcp_resources: mcp_resources.clone(),
                 executor_capability_discovery: None,
+                executor_capability_discovery_v2: Vec::new(),
             };
             let mut catalog = turn_store
                 .get::<ExecutorSkillsStepState>()
@@ -550,8 +538,9 @@ where
                         .iter()
                         .filter(|host_skill| host_skill.name == entry.name)
                     {
-                        injected_host_skill_prompts
-                            .insert_superseded_path(host_skill.path_to_skills_md.to_string_lossy());
+                        injected_host_skill_prompts.insert_superseded_path(
+                            host_skill.path_to_skills_md.inferred_native_path_string(),
+                        );
                     }
                 }
             }

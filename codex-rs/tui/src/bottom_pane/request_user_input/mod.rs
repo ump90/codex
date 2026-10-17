@@ -51,6 +51,7 @@ use codex_app_server_protocol::ToolRequestUserInputOption;
 use codex_app_server_protocol::ToolRequestUserInputParams;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
+use codex_protocol::ThreadId;
 use codex_protocol::user_input::TextElement;
 use unicode_width::UnicodeWidthStr;
 
@@ -387,13 +388,30 @@ impl RequestUserInputOverlay {
             .is_some_and(|answer| answer.notes_visible || self.notes_has_content(idx))
     }
 
-    pub(super) fn wrapped_question_lines(&self, width: u16) -> Vec<String> {
+    pub(super) fn wrapped_question_lines(
+        &self,
+        width: u16,
+    ) -> Vec<crate::terminal_hyperlinks::HyperlinkLine> {
         self.current_question()
             .map(|q| {
-                textwrap::wrap(&q.question, width.max(1) as usize)
-                    .into_iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>()
+                q.question
+                    .split('\n')
+                    .flat_map(|text| {
+                        let source = crate::terminal_hyperlinks::annotate_web_urls_in_line(
+                            text.to_owned().into(),
+                        );
+                        let wrapped =
+                            crate::wrapping::wrap_ranges_trim(text, usize::from(width.max(1)))
+                                .into_iter()
+                                .map(|range| crate::wrapping::WrappedLine {
+                                    line: (&text[range.clone()]).into(),
+                                    range,
+                                    prefix_bytes: 0,
+                                })
+                                .collect();
+                        crate::terminal_hyperlinks::remap_source_wrapped_line(&source, wrapped)
+                    })
+                    .collect()
             })
             .unwrap_or_default()
     }
@@ -880,7 +898,12 @@ impl RequestUserInputOverlay {
                 },
             );
         }
+        let Ok(thread_id) = ThreadId::from_string(&self.request.thread_id) else {
+            tracing::error!("user input request had an invalid thread ID");
+            return;
+        };
         self.app_event_tx.user_input_answer(
+            thread_id,
             self.request.turn_id.clone(),
             ToolRequestUserInputResponse {
                 answers: answers.clone(),
@@ -899,7 +922,12 @@ impl RequestUserInputOverlay {
     fn submit_empty_auto_resolution(&mut self, now: Instant) {
         self.confirm_unanswered = None;
         let answers: HashMap<String, ToolRequestUserInputAnswer> = HashMap::new();
+        let Ok(thread_id) = ThreadId::from_string(&self.request.thread_id) else {
+            tracing::error!("user input request had an invalid thread ID");
+            return;
+        };
         self.app_event_tx.user_input_answer(
+            thread_id,
             self.request.turn_id.clone(),
             ToolRequestUserInputResponse {
                 answers: answers.clone(),
@@ -1432,6 +1460,12 @@ impl BottomPaneView for RequestUserInputOverlay {
         true
     }
 
+    fn program_status_blocked_kind(
+        &self,
+    ) -> Option<crate::terminal_program_status::ProgramStatusKind> {
+        Some(crate::terminal_program_status::ProgramStatusKind::Question)
+    }
+
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         if self.confirm_unanswered_active() {
             self.close_unanswered_confirmation();
@@ -1688,13 +1722,26 @@ mod tests {
         questions: Vec<ToolRequestUserInputQuestion>,
     ) -> ToolRequestUserInputParams {
         ToolRequestUserInputParams {
-            thread_id: "thread-1".to_string(),
+            thread_id: "00000000-0000-0000-0000-000000000001".to_string(),
             item_id: "call-1".to_string(),
             turn_id: turn_id.to_string(),
             questions,
             is_blocking: true,
             auto_resolution_ms: None,
         }
+    }
+
+    fn expect_user_input_answer(
+        event: AppEvent,
+    ) -> (ThreadId, String, ToolRequestUserInputResponse) {
+        let AppEvent::SubmitThreadOp {
+            thread_id,
+            op: Op::UserInputAnswer { id, response },
+        } = event
+        else {
+            panic!("expected thread-scoped UserInputAnswer event");
+        };
+        (thread_id, id, response)
     }
 
     fn request_event_with_auto_resolution(
@@ -1834,9 +1881,8 @@ mod tests {
         assert!(overlay.done);
 
         let event = rx.try_recv().expect("expected UserInputAnswer event");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
-            panic!("expected UserInputAnswer event");
-        };
+        let (thread_id, id, response) = expect_user_input_answer(event);
+        assert_eq!(thread_id.to_string(), overlay.request.thread_id);
         assert_eq!(id, "turn-1");
         assert_eq!(response.answers, HashMap::new());
     }
@@ -1959,9 +2005,8 @@ mod tests {
         assert!(overlay.done);
 
         let event = rx.try_recv().expect("expected UserInputAnswer event");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response }) = event else {
-            panic!("expected UserInputAnswer event");
-        };
+        let (thread_id, id, response) = expect_user_input_answer(event);
+        assert_eq!(thread_id.to_string(), overlay.request.thread_id);
         assert_eq!(id, "turn-1");
         assert_eq!(response.answers, HashMap::new());
 
@@ -2138,7 +2183,7 @@ mod tests {
         let (tx, mut rx) = test_sender();
         let mut overlay = RequestUserInputOverlay::new(
             ToolRequestUserInputParams {
-                thread_id: "thread-1".to_string(),
+                thread_id: "00000000-0000-0000-0000-000000000001".to_string(),
                 item_id: "call-1".to_string(),
                 turn_id: "turn-1".to_string(),
                 questions: vec![question_with_options("q1", "First")],
@@ -2205,9 +2250,8 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { id, response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (thread_id, id, response) = expect_user_input_answer(event);
+        assert_eq!(thread_id.to_string(), overlay.request.thread_id);
         assert_eq!(id, "turn-1");
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
@@ -2227,9 +2271,7 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, vec!["Option 1".to_string()]);
     }
@@ -2263,9 +2305,7 @@ mod tests {
 
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let mut expected = HashMap::new();
         expected.insert(
             "q1".to_string(),
@@ -2296,9 +2336,7 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Char('2')));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, vec!["Option 2".to_string()]);
     }
@@ -2666,9 +2704,7 @@ mod tests {
         overlay.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
         let answer = response.answers.get("q2").expect("answer missing");
@@ -3057,9 +3093,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
     }
@@ -3082,9 +3116,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
     }
@@ -3125,9 +3157,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(answer.answers, Vec::<String>::new());
     }
@@ -3161,9 +3191,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(
             answer.answers,
@@ -3275,9 +3303,7 @@ mod tests {
         overlay.submit_answers();
 
         let event = rx.try_recv().expect("expected AppEvent");
-        let AppEvent::CodexOp(Op::UserInputAnswer { response, .. }) = event else {
-            panic!("expected UserInputAnswer");
-        };
+        let (_, _, response) = expect_user_input_answer(event);
         let answer = response.answers.get("q1").expect("answer missing");
         assert_eq!(
             answer.answers,
@@ -3707,6 +3733,47 @@ mod tests {
             "request_user_input_hidden_options_footer",
             render_snapshot(&overlay, area)
         );
+    }
+
+    #[test]
+    fn wrapped_question_preserves_the_complete_url_destination() {
+        let url = "https://github.com/openai/codex/pull/12345?diff=split";
+        let (tx, _rx) = test_sender();
+        let mut question = question_without_options("q1", "Release");
+        question.question = format!("Review the release\n\nReview {url} before choosing.");
+        let overlay = RequestUserInputOverlay::new(
+            request_event("turn-1", vec![question]),
+            tx,
+            /*has_input_focus*/ true,
+            /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        );
+        let area = Rect::new(0, 0, 40, 18);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+        let linked = buf
+            .content
+            .iter()
+            .filter(|cell| cell.symbol().contains("\x1b]8;;"))
+            .map(|cell| {
+                assert!(cell.symbol().starts_with(&format!("\x1b]8;;{url}\x07")));
+                crate::terminal_hyperlinks::strip_osc8(cell.symbol())
+            })
+            .collect::<String>();
+        assert_eq!(linked, url);
+        let visible = buf
+            .content
+            .chunks(40)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| crate::terminal_hyperlinks::strip_osc8(cell.symbol()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("request_user_input_wrapped_url", visible);
     }
 
     #[test]

@@ -5,6 +5,10 @@ use super::TransportEvent;
 use super::acquire_app_server_startup_lock;
 use super::app_server_control_socket_path;
 use super::start_control_socket_acceptor;
+#[cfg(unix)]
+use super::unix_socket::acquire_removable_app_server_startup_lock;
+#[cfg(unix)]
+use super::unix_socket::try_acquire_removable_app_server_startup_lock;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_core::config::find_codex_home;
@@ -311,6 +315,44 @@ async fn app_server_startup_lock_serializes_waiters() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn removable_startup_lock_attempt_is_nonblocking() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let lock_path = AbsolutePathBuf::from_absolute_path(temp_dir.path().join("socket.lock"))
+        .expect("lock path should resolve");
+    let _lock = try_acquire_removable_app_server_startup_lock(lock_path.clone())
+        .expect("first lock should succeed");
+    let error = timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            try_acquire_removable_app_server_startup_lock(lock_path)
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .err()
+    .unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn removable_startup_lock_rejects_a_dangling_symlink_collision() {
+    let temp_dir = tempfile::TempDir::new().expect("temp dir");
+    let lock_path = AbsolutePathBuf::from_absolute_path(temp_dir.path().join("socket.lock"))
+        .expect("lock path should resolve");
+    std::os::unix::fs::symlink(temp_dir.path().join("missing/target"), lock_path.as_path())
+        .expect("dangling symlink should be created");
+
+    let error = acquire_removable_app_server_startup_lock(lock_path)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn control_socket_rejects_writable_parent_without_changing_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -370,6 +412,10 @@ async fn control_socket_file_is_private_after_bind() {
     );
     let physical_path = std::fs::read_link(socket_path.as_path()).expect("rendezvous symlink");
     assert_eq!(
+        super::verified_local_daemon_socket(socket_path.as_path()).unwrap(),
+        Some(AbsolutePathBuf::from_absolute_path(physical_path.clone()).unwrap())
+    );
+    assert_eq!(
         physical_path.parent(),
         Some(
             codex_uds::shared_daemon_socket_directory()
@@ -377,11 +423,22 @@ async fn control_socket_file_is_private_after_bind() {
                 .as_path()
         )
     );
+    assert!(physical_path.with_extension("lock").exists());
 
     shutdown_token.cancel();
     accept_handle.await.expect("acceptor should join");
     assert!(!physical_path.exists());
+    assert!(!physical_path.with_extension("lock").exists());
     assert!(std::fs::symlink_metadata(socket_path.as_path()).is_err());
+
+    // SSH/socat may bind directly at the same advertised path.
+    let forwarded = tokio::net::UnixListener::bind(socket_path.as_path()).unwrap();
+    assert_eq!(
+        super::verified_local_daemon_socket(socket_path.as_path()).unwrap(),
+        None
+    );
+    drop(forwarded);
+    std::fs::remove_file(socket_path.as_path()).unwrap();
 
     // Simulate a dangling rendezvous left by an interrupted cleanup.
     std::os::unix::fs::symlink(&physical_path, socket_path.as_path()).unwrap();

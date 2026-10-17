@@ -4,6 +4,7 @@ use crate::config_manager::ConfigManager;
 use crate::config_manager_service::ConfigManagerError;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
+use crate::model_catalog::ModelCatalog;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
@@ -83,6 +84,7 @@ pub(crate) struct ConfigRequestProcessor {
     outgoing: Arc<OutgoingMessageSender>,
     config_manager: ConfigManager,
     thread_manager: Arc<ThreadManager>,
+    model_catalog: Arc<ModelCatalog>,
     analytics_events_client: AnalyticsEventsClient,
 }
 
@@ -91,12 +93,14 @@ impl ConfigRequestProcessor {
         outgoing: Arc<OutgoingMessageSender>,
         config_manager: ConfigManager,
         thread_manager: Arc<ThreadManager>,
+        model_catalog: Arc<ModelCatalog>,
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         Self {
             outgoing,
             config_manager,
             thread_manager,
+            model_catalog,
             analytics_events_client,
         }
     }
@@ -143,7 +147,10 @@ impl ConfigRequestProcessor {
             self.thread_manager.auth_manager().allowed_login_methods(),
         );
 
-        Ok(ConfigRequirementsReadResponse { requirements })
+        Ok(ConfigRequirementsReadResponse {
+            supports_independent_speed_modes: Some(true),
+            requirements,
+        })
     }
 
     pub(crate) async fn value_write(
@@ -208,7 +215,6 @@ impl ConfigRequestProcessor {
         let provider = create_model_provider(config.model_provider, /*auth_manager*/ None);
         let capabilities = provider.capabilities();
         Ok(ModelProviderCapabilitiesReadResponse {
-            namespace_tools: capabilities.namespace_tools,
             image_generation: capabilities.image_generation,
             web_search: capabilities.web_search,
         })
@@ -326,6 +332,11 @@ impl ConfigRequestProcessor {
             .set_api_key_model_discovery_enabled(
                 config.features.enabled(Feature::ApiKeyModelDiscovery),
             );
+        self.model_catalog
+            .set_api_key_model_discovery_enabled(
+                config.features.enabled(Feature::ApiKeyModelDiscovery),
+            )
+            .await;
         if should_start_background_rollout_migration && config.features.enabled(feature) {
             self.thread_manager.start_background_rollout_migration();
         }
@@ -627,6 +638,19 @@ fn map_browser_use_requirements_to_api(
     browser_use: codex_config::BrowserUseRequirementsToml,
 ) -> BrowserUseRequirements {
     BrowserUseRequirements {
+        extension: browser_use.extension.map(|extension| {
+            codex_app_server_protocol::BrowserUseExtensionRequirements {
+                request_headers: extension.request_headers.map(|headers| {
+                    headers
+                        .into_iter()
+                        .map(|header| codex_app_server_protocol::RequestHeader {
+                            name: header.name,
+                            value: header.value,
+                        })
+                        .collect()
+                }),
+            }
+        }),
         allow_webmcp: browser_use.allow_webmcp,
         allow_history_access: browser_use.allow_history_access,
         disable_auto_review: browser_use.disable_auto_review,
@@ -1097,6 +1121,12 @@ client_id = "mcp-client"
         let mapped = map_test_requirements(ConfigRequirementsToml {
             allow_browser_and_computer_use: Some(false),
             browser_use: Some(BrowserUseRequirementsToml {
+                extension: Some(codex_config::BrowserUseExtensionRequirementsToml {
+                    request_headers: Some(vec![codex_config::RequestHeaderToml {
+                        name: "x-browser-agent".into(),
+                        value: "ChatGPT/{{session_id}}".into(),
+                    }]),
+                }),
                 allow_webmcp: Some(true),
                 allow_history_access: Some(false),
                 disable_auto_review: Some(true),
@@ -1155,6 +1185,12 @@ client_id = "mcp-client"
         assert_eq!(
             mapped.browser_use,
             Some(BrowserUseRequirements {
+                extension: Some(codex_app_server_protocol::BrowserUseExtensionRequirements {
+                    request_headers: Some(vec![codex_app_server_protocol::RequestHeader {
+                        name: "x-browser-agent".into(),
+                        value: "ChatGPT/{{session_id}}".into()
+                    }]),
+                }),
                 allow_webmcp: Some(true),
                 allow_history_access: Some(false),
                 disable_auto_review: Some(true),
@@ -1219,6 +1255,7 @@ client_id = "mcp-client"
                     codex_config::WindowsSandboxImplementationToml::Unelevated,
                 ]),
                 allow_mxc: None,
+                require_mxc: None,
             }),
             ..ConfigRequirementsToml::default()
         });

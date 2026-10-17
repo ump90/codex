@@ -15,6 +15,8 @@ use super::manual_update::run as manual_update_once;
 #[cfg(unix)]
 use crate::Daemon;
 #[cfg(unix)]
+use crate::RestartIfRunningOutcome;
+#[cfg(unix)]
 use crate::UpdateOutput;
 #[cfg(unix)]
 use crate::UpdateStatus;
@@ -513,6 +515,46 @@ async fn manual_request_retries_after_updater_replacement() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn manual_request_accepts_maximum_installer_stderr_detail() {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let home = TempDir::new().expect("home");
+    let (daemon, _) = manual_update_daemon(&home);
+    let socket_path = daemon.manual_update_socket_path();
+    codex_uds::prepare_private_socket_directory(socket_path.parent().expect("socket parent"))
+        .await
+        .expect("socket directory");
+    let mut listener = codex_uds::UnixListener::bind(&socket_path)
+        .await
+        .expect("updater socket");
+    let expected_suffix = "installer failed";
+    let message = format!(
+        "standalone updater failed:\n{}{}",
+        "\0".repeat(super::INSTALLER_STDERR_TAIL_BYTES),
+        expected_suffix,
+    );
+    let response = serde_json::to_vec(&Err::<UpdateOutput, _>(message)).expect("serialize error");
+    assert!(response.len() < super::manual_update::MAX_RESPONSE_BYTES as usize);
+    let server = tokio::spawn(async move {
+        let mut connection = listener.accept().await.expect("request connection");
+        let mut request = [0; 7];
+        connection.read_exact(&mut request).await.expect("request");
+        connection
+            .write_all(&response)
+            .await
+            .expect("send response");
+    });
+
+    let error = super::manual_update::request(&daemon)
+        .await
+        .expect_err("manual update should fail");
+    assert!(error.to_string().ends_with(expected_suffix));
+    server.await.expect("server task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn manual_request_recovers_when_one_shot_updater_exits() {
     use tokio::io::AsyncReadExt;
 
@@ -676,6 +718,113 @@ async fn test_control_server(
 
 #[cfg(unix)]
 #[tokio::test]
+async fn scheduled_no_op_preserves_daemon_and_hands_off_stale_updater() {
+    let home = TempDir::new().expect("home");
+    let (mut daemon, release) = manual_update_daemon(&home);
+    let root = home.path().join("packages/app-server-daemon");
+    std::fs::rename(home.path().join("packages/standalone"), &root).unwrap();
+    daemon = daemon.current_installation().unwrap();
+    let stale = root
+        .join("releases")
+        .join(release.replace("1.0.0", "0.8.0"));
+    std::fs::create_dir_all(stale.join("bin")).unwrap();
+    std::fs::copy(&daemon.managed_codex_bin, stale.join("bin/codex")).unwrap();
+    std::fs::write(
+        stale.join("codex-package.json"),
+        serde_json::json!({
+            "version": "0.8.0",
+            "target": release.strip_prefix("1.0.0-").unwrap(),
+            "entrypoint": "bin/codex"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    crate::release_pruning::record_selection(&root, /*previous*/ None).unwrap();
+    let settings = crate::settings::DaemonSettings::default();
+    let backend = crate::backend::pid_backend(daemon.backend_paths(&settings));
+    backend.start().await.expect("start daemon");
+    let server = test_control_server(&daemon, home.path()).await;
+    let pid_record = std::fs::read(&daemon.pid_file).expect("daemon PID record");
+    let no_op = FakeInstallerHttp::new(InstallerResponse::Success(
+        b"# CODEX_INSTALL_IF_LATEST CODEX_INSTALL_DAEMON_ONLY\nexit 0\n".to_vec(),
+    ));
+
+    let outcome = super::update_once(
+        &no_op,
+        &daemon,
+        &executable_identity_from_reader(&b"stale updater"[..]).expect("updater identity"),
+        &mut test_terminate(),
+        super::UpdateTrigger::Scheduled,
+    )
+    .await
+    .expect("scheduled update");
+
+    assert!(matches!(
+        outcome,
+        (
+            super::UpdateLoopControl::Continue,
+            Some(RestartIfRunningOutcome::AlreadyCurrent)
+        )
+    ));
+    assert_eq!(
+        std::fs::read(&daemon.pid_file).expect("daemon PID record"),
+        pid_record
+    );
+    assert!(daemon.managed_codex_bin.is_file());
+    assert!(!stale.exists());
+    backend.stop().await.expect("stop daemon");
+    server.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scheduled_resource_only_update_restarts_daemon() {
+    let home = TempDir::new().expect("home");
+    let (daemon, release) = manual_update_daemon(&home);
+    let settings = crate::settings::DaemonSettings::default();
+    let backend = crate::backend::pid_backend(daemon.backend_paths(&settings));
+    backend.start().await.expect("start daemon");
+    let server = test_control_server(&daemon, home.path()).await;
+    let previous_pid_record = std::fs::read(&daemon.pid_file).expect("daemon PID record");
+    let root = home.path().join("packages/standalone");
+    let next_release = release.replacen("1.0.0", "1.0.1", 1);
+    let installer = FakeInstallerHttp::new(InstallerResponse::Success(
+        format!(
+            "#!/bin/sh\n# CODEX_INSTALL_IF_LATEST\nmkdir -p '{root}/releases/{next_release}'\ncp '{root}/releases/{release}/codex' '{root}/releases/{next_release}/codex'\nln -sfn 'releases/{next_release}' '{root}/current'\nprintf '{next_release}' > '{root}/auto-update-version'\n",
+            root = root.display(),
+        )
+        .into_bytes(),
+    ));
+
+    let outcome = super::update_once(
+        &installer,
+        &daemon,
+        &executable_identity(&daemon.managed_codex_bin)
+            .await
+            .expect("updater identity"),
+        &mut test_terminate(),
+        super::UpdateTrigger::Scheduled,
+    )
+    .await
+    .expect("scheduled update");
+
+    assert!(matches!(
+        outcome,
+        (
+            super::UpdateLoopControl::Continue,
+            Some(RestartIfRunningOutcome::Restarted)
+        )
+    ));
+    assert_ne!(
+        std::fs::read(&daemon.pid_file).expect("daemon PID record"),
+        previous_pid_record
+    );
+    backend.stop().await.expect("stop daemon");
+    server.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn manual_update_restarts_managed_daemon_with_automatic_updates_disabled() {
     check_manual_update_restart("standalone").await;
 }
@@ -741,7 +890,7 @@ async fn daemon_start_and_restart_preserve_launch_features() {
         );
         assert_eq!(std::fs::read_to_string(&args_path).unwrap(), expected);
         std::fs::remove_file(&args_path).unwrap();
-        let restarted = daemon.restart().await;
+        let restarted = daemon.restart(&std::collections::BTreeMap::new()).await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 10);
         while std::fs::read_to_string(&args_path).ok().as_deref() != Some(expected)
             && tokio::time::Instant::now() < deadline
@@ -1023,20 +1172,60 @@ Test-Installer
     .await
     .expect("installer succeeds");
     let failing = FakeInstallerHttp::new(InstallerResponse::Success(
-        b"throw 'installer failed'".to_vec(),
+        b"throw ([string][char]0x00E9 + 'chec installation')".to_vec(),
     ));
     let script = super::fetch_installer_script(&failing)
         .await
         .expect("fetch failing installer");
-    assert!(
-        super::run_installer_script(
-            &script,
-            super::InstallerMode::RestoreProduction("0.150.0-x86_64-pc-windows-msvc"),
-            std::path::Path::new("packages/app-server-daemon")
-        )
-        .await
-        .is_err()
+    let error = super::run_installer_script(
+        &script,
+        super::InstallerMode::RestoreProduction("0.150.0-x86_64-pc-windows-msvc"),
+        std::path::Path::new("packages/app-server-daemon"),
+    )
+    .await
+    .err()
+    .expect("installer should fail");
+    assert!(error.to_string().contains("échec installation"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installer_failure_includes_stderr() {
+    let script = format!(
+        "printf 'discard me{}' >&2\nprintf 'installer failed' >&2\nexit 1\n",
+        "x".repeat(super::INSTALLER_STDERR_TAIL_BYTES),
     );
+    let error = super::run_installer_script(
+        script.as_bytes(),
+        super::InstallerMode::Update("0.150.0-x86_64-unknown-linux-gnu"),
+        std::path::Path::new("packages/app-server-daemon"),
+        futures::future::pending(),
+    )
+    .await
+    .err()
+    .expect("installer should fail");
+    let error = error.to_string();
+    assert!(error.contains("installer failed"));
+    assert!(!error.contains("discard me"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn installer_failure_preserves_stderr_before_drain_timeout() {
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        super::run_installer_script(
+            b"printf 'installer failed' >&2\nsleep 5 &\nexit 1\n",
+            super::InstallerMode::Update("0.150.0-x86_64-unknown-linux-gnu"),
+            std::path::Path::new("packages/app-server-daemon"),
+            futures::future::pending(),
+        ),
+    )
+    .await
+    .expect("stderr drain should time out")
+    .err()
+    .expect("installer should fail");
+    assert!(error.to_string().contains("installer failed"));
 }
 
 #[cfg(unix)]

@@ -3,6 +3,7 @@
 //! This module owns the typed JSON-RPC calls needed by the TUI and keeps
 //! request/response plumbing out of `App` and `ChatWidget`.
 
+mod daybreak_api_key_compat;
 mod external_agent_config;
 pub(crate) mod fs;
 mod history;
@@ -180,6 +181,11 @@ pub(crate) enum ForkPermissionMode {
     OverrideFromCurrentConfig,
 }
 
+enum EmptyCatalogFallback {
+    Error,
+    ManagedNewThread,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ForkPresentation {
     Regular,
@@ -316,6 +322,7 @@ pub(crate) struct AppServerBootstrap {
 }
 
 pub(crate) struct AppServerSession {
+    backend_id: crate::backend_id::BackendId,
     client: AppServerClient,
     next_request_id: i64,
     history_pagination: HashMap<ThreadId, history::ThreadHistoryPagination>,
@@ -327,9 +334,10 @@ pub(crate) struct AppServerSession {
     /// Explicit CLI provider selection, distinct from resolved configuration defaults.
     pub(crate) model_provider_override: Option<String>,
     history_support: ThreadHistorySupport,
-    thread_settings_update_supported: bool,
+    pub(crate) thread_settings_update_supported: bool,
     default_model: Option<String>,
     available_models: Vec<ModelPreset>,
+    daybreak_api_key_compat: Arc<tokio::sync::Semaphore>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_id: Mutex<Option<String>>,
     dynamic_tool_mcp: Option<Arc<DynamicToolMcpServer>>,
@@ -421,8 +429,13 @@ impl AppServerSession {
         self.client.platform_os()
     }
 
-    pub(crate) fn new(client: AppServerClient, thread_params_mode: ThreadParamsMode) -> Self {
+    pub(crate) fn new(
+        backend_id: crate::backend_id::BackendId,
+        client: AppServerClient,
+        thread_params_mode: ThreadParamsMode,
+    ) -> Self {
         Self {
+            backend_id,
             client,
             next_request_id: 1,
             history_pagination: HashMap::new(),
@@ -436,11 +449,16 @@ impl AppServerSession {
             thread_settings_update_supported: true,
             default_model: None,
             available_models: Vec::new(),
+            daybreak_api_key_compat: Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             managed_new_thread_defaults: None,
             external_agent_config_import_id: Mutex::default(),
             dynamic_tool_mcp: None,
             worktree_source_config_builder: None,
         }
+    }
+
+    pub(crate) fn backend_id(&self) -> crate::backend_id::BackendId {
+        self.backend_id
     }
 
     pub(crate) async fn start_dynamic_tool_mcp(
@@ -449,10 +467,7 @@ impl AppServerSession {
         app_event_tx: AppEventSender,
         status_updates: tokio::sync::broadcast::Sender<ThreadStatusChangedNotification>,
     ) -> std::io::Result<()> {
-        let worktrees = if !self.uses_remote_workspace()
-            && !config.active_project.is_untrusted()
-            && config.features.enabled(codex_features::Feature::Worktrees)
-        {
+        let worktrees = if !self.uses_remote_workspace() && !config.active_project.is_untrusted() {
             // Listing a fresh, nonexistent thread is read-only and returns an empty page
             // on supported stores. Probe before advertising tools or allocating a checkout.
             let support = self
@@ -542,6 +557,7 @@ impl AppServerSession {
             DynamicToolMcpServer::start(
                 self.request_handle(),
                 thread_start_params,
+                config.features.get().clone(),
                 app_event_tx,
                 status_updates,
                 managed_requirement,
@@ -642,6 +658,19 @@ impl AppServerSession {
         Ok(bootstrap)
     }
 
+    pub(crate) async fn bootstrap_for_new_thread(
+        &mut self,
+        config: &Config,
+    ) -> Result<AppServerBootstrap> {
+        let started_at = Instant::now();
+        let account = self.read_account().await?;
+        let mut bootstrap = self
+            .bootstrap_with_account_inner(config, account, EmptyCatalogFallback::ManagedNewThread)
+            .await?;
+        bootstrap.duration = started_at.elapsed();
+        Ok(bootstrap)
+    }
+
     /// Bootstraps using a previously read account.
     ///
     /// Callers must discard a prefetched account after authentication, server, or provider changes.
@@ -649,6 +678,16 @@ impl AppServerSession {
         &mut self,
         config: &Config,
         account: GetAccountResponse,
+    ) -> Result<AppServerBootstrap> {
+        self.bootstrap_with_account_inner(config, account, EmptyCatalogFallback::Error)
+            .await
+    }
+
+    async fn bootstrap_with_account_inner(
+        &mut self,
+        config: &Config,
+        account: GetAccountResponse,
+        fallback: EmptyCatalogFallback,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
         // `hooks/list` holds the global config queue during startup. Submit models and config
@@ -689,15 +728,29 @@ impl AppServerSession {
             },
             async { Ok(crate::collaboration_modes::list(self.request_handle()).await) },
         )?;
-        self.managed_new_thread_defaults = requirements
-            .requirements
-            .and_then(|requirements| requirements.models)
-            .and_then(|models| models.new_thread);
-        let available_models = models
+        let mut available_models = models
             .data
             .into_iter()
             .map(model_preset_from_api_model)
             .collect::<Vec<_>>();
+        crate::service_tier_resolution::constrain_server_service_tiers(
+            &mut available_models,
+            &requirements,
+        );
+        if matches!(account.account, Some(Account::ApiKey {})) {
+            available_models = self
+                .constrain_api_key_models(
+                    config,
+                    /*thread_id*/ None,
+                    requirements.requirements.as_ref(),
+                    available_models,
+                )
+                .await;
+        }
+        self.managed_new_thread_defaults = requirements
+            .requirements
+            .and_then(|requirements| requirements.models)
+            .and_then(|models| models.new_thread);
         let default_model = config
             .model
             .clone()
@@ -708,6 +761,13 @@ impl AppServerSession {
                     .map(|model| model.model.clone())
             })
             .or_else(|| available_models.first().map(|model| model.model.clone()))
+            .or_else(|| match fallback {
+                EmptyCatalogFallback::Error => None,
+                EmptyCatalogFallback::ManagedNewThread => self
+                    .managed_new_thread_defaults
+                    .as_ref()
+                    .and_then(|defaults| defaults.model.clone()),
+            })
             .wrap_err("No models are available. Set `model` explicitly or check your model catalog configuration.")?;
         self.default_model = Some(default_model.clone());
         self.available_models = available_models.clone();
@@ -1399,10 +1459,13 @@ impl AppServerSession {
                     disabled_plugin_ids: None,
                     thread_id: thread_id.to_string(),
                     turn_trigger: Some("user".to_string()),
+                    parent_turn_id: None,
+                    root_turn_id: None,
                     client_user_message_id: Some(client_user_message_id),
                     input: items,
                     tool_output: None,
                     responsesapi_client_metadata: None,
+                    responsesapi_client_metadata_patch: None,
                     additional_context: None,
                     environments: None,
                     cwd: Some(cwd),
@@ -1469,6 +1532,7 @@ impl AppServerSession {
                     client_user_message_id: Some(client_user_message_id),
                     input: items,
                     responsesapi_client_metadata: None,
+                    responsesapi_client_metadata_patch: None,
                     additional_context: None,
                     expected_turn_id: turn_id,
                 },
@@ -1736,14 +1800,6 @@ impl AppServerSession {
         Ok(())
     }
 
-    pub(crate) async fn reject_server_request(
-        &self,
-        request_id: RequestId,
-        error: JSONRPCErrorError,
-    ) -> std::io::Result<()> {
-        self.client.reject_server_request(request_id, error).await
-    }
-
     pub(crate) async fn resolve_server_request(
         &self,
         request_id: RequestId,
@@ -1858,7 +1914,7 @@ pub(crate) fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
                 description: effort.description,
             })
             .collect(),
-        supports_personality: model.supports_personality,
+        supports_personality: false,
         additional_speed_tiers: model.additional_speed_tiers,
         service_tiers: model
             .service_tiers
@@ -1946,8 +2002,8 @@ fn config_request_overrides_from_config(
         &origins,
         &mut overrides,
     );
-    for key in ["model_reasoning_summary", "model_verbosity"] {
-        if origins.get(key).is_some_and(|origin| {
+    let is_launch = |key: &str| {
+        origins.get(key).is_some_and(|origin| {
             matches!(
                 origin.name,
                 ConfigLayerSource::SessionFlags
@@ -1956,9 +2012,18 @@ fn config_request_overrides_from_config(
                         ..
                     }
             )
-        }) {
+        })
+    };
+    for key in ["model_reasoning_summary", "model_verbosity"] {
+        if is_launch(key) {
             overrides.insert(key.to_string(), serde_json::json!(effective[key]));
         }
+    }
+    if is_launch("features.concurrent_reasoning_summaries") {
+        overrides
+            .entry("features".to_string())
+            .or_insert_with(|| serde_json::json!({}))["concurrent_reasoning_summaries"] =
+            serde_json::json!(effective["features"]["concurrent_reasoning_summaries"]);
     }
     if config.bypass_hook_trust {
         overrides.insert("bypass_hook_trust".to_string(), true.into());
@@ -1980,37 +2045,6 @@ fn remove_permission_config_overrides(config: &mut Option<HashMap<String, serde_
     if config.as_ref().is_some_and(HashMap::is_empty) {
         *config = None;
     }
-}
-
-fn new_thread_reasoning_overrides(config: &Config) -> Option<HashMap<String, serde_json::Value>> {
-    let mut overrides = config_request_overrides_from_config(config, ThreadParamsMode::Embedded)
-        .unwrap_or_default();
-    let summary = config
-        .model_reasoning_summary
-        .unwrap_or(codex_protocol::config_types::ReasoningSummary::None);
-    overrides.insert(
-        "model_reasoning_summary".to_string(),
-        serde_json::Value::String(summary.to_string()),
-    );
-    let explicit_feature = config
-        .config_layer_stack
-        .effective_config()
-        .get("features")
-        .and_then(|features| features.get("concurrent_reasoning_summaries"))
-        .and_then(toml::Value::as_bool);
-    let features = overrides
-        .entry("features".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if let Some(features) = features.as_object_mut() {
-        features.insert(
-            "concurrent_reasoning_summaries".to_string(),
-            serde_json::Value::Bool(
-                summary != codex_protocol::config_types::ReasoningSummary::None
-                    && explicit_feature.unwrap_or(/*default*/ false),
-            ),
-        );
-    }
-    Some(overrides)
 }
 
 fn service_tier_override_from_config(config: &Config) -> Option<Option<String>> {
@@ -2145,12 +2179,7 @@ pub(crate) fn thread_start_params_from_config(
         approvals_reviewer: approvals_reviewer_override_from_config(config),
         sandbox,
         permissions,
-        config: match thread_params_mode {
-            ThreadParamsMode::Embedded => new_thread_reasoning_overrides(config),
-            ThreadParamsMode::Remote => {
-                config_request_overrides_from_config(config, thread_params_mode)
-            }
-        },
+        config: config_request_overrides_from_config(config, thread_params_mode),
         ephemeral: Some(config.ephemeral),
         history_mode: (!config.ephemeral).then_some(ThreadHistoryMode::Paginated),
         session_start_source,
@@ -2611,6 +2640,7 @@ mod tests {
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
     use codex_protocol::models::ManagedFileSystemPermissions;
+    use codex_protocol::openai_models::ModelAccessPrograms;
     use codex_protocol::openai_models::ModelServiceTier;
     use codex_protocol::openai_models::ReasoningEffort;
     use codex_protocol::permissions::FileSystemAccessMode;
@@ -2618,6 +2648,7 @@ mod tests {
     use codex_protocol::permissions::FileSystemSandboxEntry;
     use codex_protocol::permissions::FileSystemSpecialPath;
     use codex_protocol::permissions::NetworkSandboxPolicy;
+    use codex_protocol::turn_input::CyberAccessProgram;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
     use codex_utils_path_uri::LegacyAppPathString;
@@ -2635,7 +2666,17 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_reuses_prefetched_account_without_another_account_read() -> Result<()> {
         let codex_home = tempfile::tempdir()?;
-        let config = build_config(&codex_home).await;
+        let mut config = build_config(&codex_home).await;
+        let mut catalog = codex_models_manager::bundled_models_response()?;
+        for model in &mut catalog.models {
+            model.available_access_programs = Some(ModelAccessPrograms {
+                cyber: vec![
+                    CyberAccessProgram::Standard,
+                    CyberAccessProgram::DaybreakBlue,
+                ],
+            });
+        }
+        config.model_catalog = Some(catalog);
         let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
         let next_request_id = app_server.next_request_id;
         let account = GetAccountResponse {
@@ -2667,6 +2708,63 @@ mod tests {
             )
         );
 
+        // Account-specific catalog filtering at startup and before/after thread creation.
+        let models = bootstrap.available_models;
+        assert!(
+            models
+                .iter()
+                .any(|model| model.available_access_programs.is_some())
+        );
+        let client_home = tempfile::tempdir()?;
+        let key = "features.api_key_cyber_access_programs";
+        for (server_enabled, cli_override, forwarding_enabled) in [
+            (false, None, false),
+            (true, None, true),
+            (false, Some(true), true),
+            (true, Some(false), false),
+        ] {
+            std::fs::write(
+                codex_home.path().join("config.toml"),
+                format!("[features]\napi_key_cyber_access_programs = {server_enabled}\n"),
+            )?;
+            let client_config = ConfigBuilder::default()
+                .codex_home(client_home.path().to_path_buf())
+                .cli_overrides(
+                    cli_override
+                        .into_iter()
+                        .map(|value| (key.into(), value.into()))
+                        .collect(),
+                )
+                .build()
+                .await?;
+            let api_key = app_server
+                .bootstrap_with_account(
+                    &client_config,
+                    GetAccountResponse {
+                        account: Some(Account::ApiKey {}),
+                        requires_openai_auth: true,
+                        workspace_routing: None,
+                    },
+                )
+                .await?;
+            let mut expected = models.clone();
+            if !forwarding_enabled {
+                for model in &mut expected {
+                    model.available_access_programs = None;
+                }
+            }
+            assert_eq!(api_key.available_models, expected);
+            let thread = app_server.start_thread(&client_config).await?;
+            let refreshed = app_server
+                .constrain_api_key_models(
+                    &client_config,
+                    Some(thread.session.thread_id),
+                    /*requirements*/ None,
+                    models.clone(),
+                )
+                .await;
+            assert_eq!(refreshed, expected);
+        }
         app_server.shutdown().await?;
         Ok(())
     }
@@ -3491,13 +3589,7 @@ mod tests {
             ("model_reasoning_effort".to_string(), string("high")),
             ("bypass_hook_trust".to_string(), true.into()),
         ]);
-        let mut expected_start_config = expected_config.clone();
-        expected_start_config.insert("model_reasoning_summary".to_string(), string("detailed"));
-        expected_start_config.insert(
-            "features".to_string(),
-            serde_json::json!({"concurrent_reasoning_summaries": false}),
-        );
-        assert_eq!(start.config, Some(expected_start_config));
+        assert_eq!(start.config, Some(expected_config.clone()));
         assert_eq!(resume.config, Some(expected_config.clone()));
         assert_eq!(fork.config, Some(expected_config));
     }
@@ -4111,6 +4203,7 @@ mod tests {
                 name: None,
                 turns: vec![Turn {
                     id: "turn-1".to_string(),
+                    root_turn_id: None,
                     items_view: codex_app_server_protocol::TurnItemsView::Full,
                     items: vec![
                         codex_app_server_protocol::ThreadItem::UserMessage {

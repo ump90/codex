@@ -10,7 +10,9 @@ import sync_upstream_release as sync
 class ReleasePagesTest(unittest.TestCase):
     def failure(self, status):
         return subprocess.CalledProcessError(
-            1, ["gh", "api"], output='[[{"partial": true}]]',
+            1,
+            ["gh", "api"],
+            output='[[{"partial": true}]]',
             stderr=f"gh: request failed (HTTP {status})",
         )
 

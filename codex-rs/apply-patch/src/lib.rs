@@ -36,14 +36,10 @@ pub use file_update::ApplyPatchFileUpdate;
 use file_update::derive_new_contents_from_chunks;
 pub use file_update::unified_diff_from_chunks;
 pub use file_update::unified_diff_from_chunks_with_context;
-pub(crate) use file_update::unified_diff_from_chunks_with_mode;
 pub use invocation::MaybeApplyPatch;
 pub use invocation::maybe_parse_apply_patch;
 pub use invocation::maybe_parse_apply_patch_verified;
-pub use invocation::maybe_parse_apply_patch_verified_with_mode;
 pub use invocation::verify_apply_patch_args;
-pub use invocation::verify_apply_patch_args_with_mode;
-pub use invocation::verify_apply_patch_args_with_mode_and_path_syntax;
 pub use invocation::verify_apply_patch_args_with_path_syntax;
 pub use standalone_executable::main;
 
@@ -94,25 +90,14 @@ pub(crate) fn resolve_patch_path(
     cwd.join(normalized.as_deref().unwrap_or(path))
 }
 
-/// Internal environment variable used to carry the selected update mode
-/// through the arg0-dispatched standalone executable.
+/// Compatibility opt-in for older standalone `apply_patch` executables.
+/// Current executables always preserve line endings.
 pub const CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS_ENV_VAR: &str =
     "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS";
-
-/// Controls how updates reconstruct the target file after matching a patch.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ApplyPatchFileUpdateMode {
-    /// Preserve the historical behavior of normalizing updated files to LF.
-    #[default]
-    NormalizeToLf,
-    /// Preserve existing line endings and use the file's preferred ending for new lines.
-    PreserveLineEndings,
-}
 
 /// Policy for one patch application. Standalone callers follow symlinks by default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ApplyPatchOptions {
-    pub update_file_mode: ApplyPatchFileUpdateMode,
     /// Whether filesystem operations may resolve symlinks in any path component.
     pub follow_symlinks: bool,
 }
@@ -120,18 +105,8 @@ pub struct ApplyPatchOptions {
 impl Default for ApplyPatchOptions {
     fn default() -> Self {
         Self {
-            update_file_mode: ApplyPatchFileUpdateMode::default(),
             follow_symlinks: true,
         }
-    }
-}
-
-/// Reads the update mode selected for an arg0-dispatched `apply_patch` process.
-#[doc(hidden)]
-pub fn apply_patch_file_update_mode_from_env() -> ApplyPatchFileUpdateMode {
-    match std::env::var(CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS_ENV_VAR).as_deref() {
-        Ok("1") => ApplyPatchFileUpdateMode::PreserveLineEndings,
-        _ => ApplyPatchFileUpdateMode::NormalizeToLf,
     }
 }
 
@@ -233,7 +208,6 @@ pub enum MaybeApplyPatchVerified {
 pub struct ApplyPatchAction {
     changes: HashMap<PathUri, ApplyPatchFileChange>,
 
-    update_file_mode: ApplyPatchFileUpdateMode,
     path_syntax: ApplyPatchPathSyntax,
 
     /// The raw patch argument that can be used to apply the patch. i.e., if the
@@ -253,11 +227,6 @@ impl ApplyPatchAction {
     /// Returns the changes that would be made by applying the patch.
     pub fn changes(&self) -> &HashMap<PathUri, ApplyPatchFileChange> {
         &self.changes
-    }
-
-    /// Returns the update mode selected while the patch was verified.
-    pub fn update_file_mode(&self) -> ApplyPatchFileUpdateMode {
-        self.update_file_mode
     }
 
     pub fn path_syntax(&self) -> ApplyPatchPathSyntax {
@@ -280,7 +249,6 @@ impl ApplyPatchAction {
         #[expect(clippy::expect_used)]
         Self {
             changes,
-            update_file_mode: ApplyPatchFileUpdateMode::default(),
             path_syntax: ApplyPatchPathSyntax::Native,
             cwd: path.parent().expect("path should have parent"),
             patch,
@@ -601,10 +569,7 @@ async fn apply_hunks_to_files(
     sandbox: Option<&FileSystemSandboxContext>,
     delta: &mut AppliedPatchDelta,
 ) -> anyhow::Result<AffectedPaths> {
-    let ApplyPatchOptions {
-        update_file_mode,
-        follow_symlinks,
-    } = options;
+    let ApplyPatchOptions { follow_symlinks } = options;
     if hunks.is_empty() {
         anyhow::bail!("No files were modified.");
     }
@@ -736,7 +701,6 @@ async fn apply_hunks_to_files(
                 } = derive_new_contents_from_chunks(
                     &path_uri,
                     chunks,
-                    update_file_mode,
                     fs,
                     follow_symlinks,
                     sandbox,

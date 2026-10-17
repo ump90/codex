@@ -19,14 +19,20 @@ MANIFEST = "codex-rs/Cargo.toml"
 
 def release_pages(repository: str) -> list[list[dict]]:
     command = [
-        "gh", "api", "--paginate", "--slurp",
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
         f"repos/{repository}/releases?per_page=100",
     ]
     for attempt in range(4):
         try:
             # Never parse partial stdout from a failed paginated request.
             output = subprocess.check_output(
-                command, text=True, encoding="utf-8", stderr=subprocess.PIPE,
+                command,
+                text=True,
+                encoding="utf-8",
+                stderr=subprocess.PIPE,
                 timeout=300,
             )
             return json.loads(output)
@@ -38,7 +44,8 @@ def release_pages(repository: str) -> list[list[dict]]:
                     r"HTTP (?:429|5[0-9]{2})\b|TLS handshake timeout|"
                     r"i/o timeout|connection reset|unexpected EOF|"
                     r"temporary failure in name resolution",
-                    detail, re.IGNORECASE,
+                    detail,
+                    re.IGNORECASE,
                 ):
                     raise
             if attempt == 3:
@@ -47,7 +54,8 @@ def release_pages(repository: str) -> list[list[dict]]:
             print(
                 f"GitHub release query failed (attempt {attempt + 1}/4); "
                 f"retrying in {delay}s",
-                file=sys.stderr, flush=True,
+                file=sys.stderr,
+                flush=True,
             )
             time.sleep(delay)
 

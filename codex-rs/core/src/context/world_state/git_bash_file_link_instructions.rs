@@ -1,6 +1,7 @@
 use super::PreviousSectionState;
 use super::SectionTransition;
 use super::WorldStateSection;
+use super::WorldStateUpdate;
 use crate::context::ContextualUserFragment;
 use crate::context::GitBashFileLinkInstructions;
 
@@ -41,10 +42,13 @@ impl WorldStateSection for GitBashFileLinkInstructionsState {
             || matches!(previous, PreviousSectionState::Known(previous) if *previous)
             || matches!(previous, PreviousSectionState::Unknown)
         {
-            return (Some(current), None);
+            return (Some(current), Vec::new());
         }
 
-        (Some(current), Some(Box::new(GitBashFileLinkInstructions)))
+        (
+            Some(current),
+            vec![WorldStateUpdate::fragment(GitBashFileLinkInstructions)],
+        )
     }
 }
 

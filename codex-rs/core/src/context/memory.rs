@@ -11,6 +11,11 @@ pub enum MemoryContextFragment {
     ExtractionEvidence(String),
 }
 
+impl MemoryContextFragment {
+    /// Content classification for memory read-path instructions.
+    pub const READ_INSTRUCTIONS_KIND: &str = "memories.instructions";
+}
+
 impl ContextualUserFragment for MemoryContextFragment {
     fn role(&self) -> &'static str {
         match self {
@@ -21,14 +26,11 @@ impl ContextualUserFragment for MemoryContextFragment {
     fn content_kind(&self) -> ContentItemKind {
         ContentItemKind(
             match self {
-                Self::ReadInstructions(_) => "memories.instructions",
+                Self::ReadInstructions(_) => Self::READ_INSTRUCTIONS_KIND,
                 Self::ExtractionEvidence(_) => "memories.extraction_evidence",
             }
             .to_string(),
         )
-    }
-    fn requires_separate_message(&self) -> bool {
-        true
     }
     fn markers(&self) -> (&'static str, &'static str) {
         Self::type_markers()

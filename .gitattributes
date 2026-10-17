@@ -5,3 +5,4 @@ codex-rs/state/logs_migrations/*.sql text eol=lf
 codex-rs/state/memory_migrations/*.sql text eol=lf
 codex-rs/state/migrations/*.sql text eol=lf
 third_party/voice/sources.json text eol=lf
+patches/v8_array_sort_elements_kind.patch text eol=lf

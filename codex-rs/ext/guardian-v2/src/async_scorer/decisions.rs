@@ -1,14 +1,12 @@
 //! Bounded Decisions transport for the optional Guardian comparison classifier.
 //! Admission retains the newest requests and cancels the oldest unfinished request at capacity.
 //! Unsupported evidence is rejected intact; errors never contain credentials or wire bodies.
+//! Evidence preserves message roles, content order, and boundaries.
 //! The caller records measurements after baseline publication; dropping its task aborts Decisions work.
 
-use super::metrics::decisions_failure_reason;
-use super::metrics::record_decisions_comparison_outcome;
 use super::sampler::LunaSampler;
 use super::sampler::LunaSamplingRequest;
 use codex_context_fragments::RenderedFragment;
-use codex_extension_api::ExtensionMetrics;
 use codex_history::ResponseItemEnvelope;
 use codex_http_client::HttpClient;
 use codex_protocol::models::ContentItem;
@@ -45,6 +43,10 @@ pub(super) enum DecisionsError {
     ClientSetup,
     #[error("Decisions cannot represent the complete classifier evidence")]
     UnsupportedEvidence,
+    #[error("Decisions cannot represent this image evidence")]
+    UnsupportedImage,
+    #[error("Decisions cannot represent audio evidence")]
+    UnsupportedAudio,
     #[error("Decisions input exceeds the request limit")]
     InputTooLarge,
     #[error("Decisions request timed out")]
@@ -89,35 +91,10 @@ impl Drop for DecisionsTask {
 }
 
 impl DecisionsTask {
-    pub(super) async fn finish_and_record_outcome(
+    pub(super) async fn finish(
         mut self,
-        metrics: Option<&dyn ExtensionMetrics>,
-    ) {
-        let (result, _duration) = match (&mut self.handle).await {
-            Ok(result) => result,
-            Err(error) => {
-                let (outcome, reason) = if error.is_cancelled() {
-                    ("skipped", "superseded")
-                } else {
-                    ("failure", "task_error")
-                };
-                record_decisions_comparison_outcome(metrics, outcome, reason);
-                return;
-            }
-        };
-        let outcome = match &result {
-            Ok(_) => "success",
-            Err(DecisionsError::UnsupportedEvidence | DecisionsError::InputTooLarge) => "skipped",
-            Err(_) => "failure",
-        };
-        record_decisions_comparison_outcome(
-            metrics,
-            outcome,
-            result
-                .as_ref()
-                .err()
-                .map_or("none", |error| decisions_failure_reason(*error)),
-        );
+    ) -> Result<(Result<&'static str, DecisionsError>, Duration), tokio::task::JoinError> {
+        (&mut self.handle).await
     }
 }
 
@@ -146,6 +123,7 @@ impl DecisionsSampler {
         request: &LunaSamplingRequest,
         max_input_tokens: usize,
     ) -> DecisionsTask {
+        let started = Instant::now();
         let body = request_body(
             &request.instructions,
             &request.input,
@@ -173,7 +151,7 @@ impl DecisionsSampler {
             Ok(body) => body,
             Err(error) => {
                 return DecisionsTask {
-                    handle: tokio::spawn(async move { (Err(error), Duration::ZERO) }),
+                    handle: tokio::spawn(async move { (Err(error), started.elapsed()) }),
                     sampler: Weak::new(),
                 };
             }
@@ -191,9 +169,8 @@ impl DecisionsSampler {
         let sampler = Arc::clone(self);
         let handle = tokio::spawn(async move {
             let Ok(_permit) = sampler.slots.acquire().await else {
-                return (Err(DecisionsError::Transport), Duration::ZERO);
+                return (Err(DecisionsError::Transport), started.elapsed());
             };
-            let started = Instant::now();
             let result = tokio::time::timeout(DEADLINE, sampler.request(body))
                 .await
                 .unwrap_or(Err(DecisionsError::Timeout));
@@ -249,22 +226,25 @@ fn request_body(
     let mut image_bytes = 0usize;
     let mut messages = Vec::new();
     for item in evidence {
-        let ResponseItem::Message { role, content, .. } = item else {
+        let ResponseItem::Message {
+            role,
+            content,
+            phase,
+            ..
+        } = item
+        else {
             return Err(DecisionsError::UnsupportedEvidence);
         };
-        if role != "user" {
-            return Err(DecisionsError::UnsupportedEvidence);
-        }
-        let mut parts = Vec::new();
+        let mut parts = Vec::with_capacity(content.len());
         for part in content {
             match part {
-                ContentItem::InputText { text } => {
-                    parts.push(json!({"type": "input_text", "text": text}));
+                ContentItem::InputText { .. } | ContentItem::OutputText { .. } => {
+                    parts.push(json!(part));
                 }
                 ContentItem::InputImage {
                     image: ImageReference::Inline { image_url },
                     ..
-                } if image_url.starts_with("data:") => {
+                } if role == "user" && image_url.starts_with("data:") => {
                     image_bytes = image_bytes.saturating_add(image_url.len());
                     if image_bytes > MAX_IMAGE_BYTES {
                         return Err(DecisionsError::InputTooLarge);
@@ -274,22 +254,26 @@ fn request_body(
                         json!({"type": "input_image", "image_url": image_url, "detail": null}),
                     );
                 }
-                ContentItem::InputImage { .. }
-                | ContentItem::InputAudio { .. }
-                | ContentItem::OutputText { .. } => {
-                    return Err(DecisionsError::UnsupportedEvidence);
+                ContentItem::InputImage { .. } => {
+                    return Err(DecisionsError::UnsupportedImage);
+                }
+                ContentItem::InputAudio { .. } => {
+                    return Err(DecisionsError::UnsupportedAudio);
                 }
             }
         }
-        // Harness annotations/IDs are not part of the Decisions contract. Preserve every
-        // model-visible content part and message boundary; never demote trusted developer text.
-        let mut message = json!({"role": "user"});
+        // Harness annotations/IDs are not part of the Decisions contract.
+        let mut message = json!({"role": role});
         message["content"] = Value::Array(parts);
+        if let Some(phase) = phase {
+            message["phase"] = json!(phase);
+        }
         messages.push(message);
     }
     let mut body = json!({
         "model": MODEL,
-        "questions": [{"type": "choice", "name": "guardian_risk", "instructions": rubric,
+        "questions": [{"type": "choice", "name": "guardian_risk",
+                       "instructions": rubric,
                        "choices": [{"value": "low"}, {"value": "high"}]}]
     });
     body["input"] = Value::Array(messages);
