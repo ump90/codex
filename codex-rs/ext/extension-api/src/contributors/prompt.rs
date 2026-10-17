@@ -1,6 +1,7 @@
 //! Extension prompt placement with content and producer attribution kept together.
 
 use codex_context_fragments::AnnotatedContent;
+use codex_context_fragments::ContextualUserFragment;
 use codex_context_fragments::RenderedFragment;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
@@ -21,6 +22,19 @@ pub struct PromptFragment {
 }
 
 impl PromptFragment {
+    /// Places a contextual fragment in the prompt, preserving its text, kind, and source.
+    /// The slot determines placement within the developer message, regardless of its original role.
+    pub fn from_fragment(slot: PromptSlot, fragment: &impl ContextualUserFragment) -> Self {
+        Self {
+            slot,
+            content: AnnotatedContent::text(
+                fragment.render(),
+                fragment.content_kind(),
+                fragment.content_metadata(),
+            ),
+        }
+    }
+
     /// Creates harness-provided context for the given slot.
     pub fn new(slot: PromptSlot, text: impl Into<String>, content_kind: ContentItemKind) -> Self {
         Self {

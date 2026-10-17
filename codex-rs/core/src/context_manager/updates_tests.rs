@@ -47,6 +47,8 @@ fn fragment(role: &'static str, text: &'static str) -> TestFragment {
 fn message(role: &str, texts: &[&str]) -> ResponseItem {
     let provenance = serde_json::from_value(json!({"harness_injected": true})).unwrap();
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: role.to_string(),
         content: texts
