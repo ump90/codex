@@ -163,7 +163,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) thread_source: Option<ThreadSource>,
     /// Effective originator used for this thread's Responses requests and analytics events.
     pub(super) originator: String,
-    pub(super) dynamic_tools: Vec<DynamicToolSpec>,
+    /// Fixed at thread startup and shared with turn snapshots.
+    pub(super) dynamic_tools: Arc<[DynamicToolSpec]>,
     pub(super) user_shell_override: Option<shell::Shell>,
 }
 
@@ -678,8 +679,11 @@ impl Session {
     }
 
     pub(crate) async fn dynamic_tools(&self) -> Vec<DynamicToolSpec> {
-        let state = self.state.lock().await;
-        state.session_configuration.dynamic_tools.clone()
+        let dynamic_tools = {
+            let state = self.state.lock().await;
+            Arc::clone(&state.session_configuration.dynamic_tools)
+        };
+        dynamic_tools.to_vec()
     }
 
     pub(crate) async fn responses_metadata(
@@ -1066,7 +1070,7 @@ impl Session {
                                 text: session_configuration.base_instructions.clone(),
                                 provenance: base_instructions_provenance.clone(),
                             },
-                            dynamic_tools: session_configuration.dynamic_tools.clone(),
+                            dynamic_tools: session_configuration.dynamic_tools.to_vec(),
                             selected_capability_roots: selected_capability_roots.clone(),
                             multi_agent_version: initial_multi_agent_version,
                             history_mode: session_configuration.history_mode,
@@ -1479,6 +1483,7 @@ impl Session {
                 inherited_environments.clone(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
+            turn_environments.update_configured_selections(environment_selections);
             turn_environments.update_selections(environment_selections);
             session_configuration.environments = turn_environments.selections();
             let resolved_environments = turn_environments.snapshot().await;
