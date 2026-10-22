@@ -61,6 +61,9 @@ pub(crate) struct Session {
     pub(crate) thread_id: ThreadId,
     pub(crate) installation_id: String,
     pub(super) tx_event: Sender<Event>,
+    /// Installed by Guardian before its first review; forwards items and cancellation without
+    /// transferring ownership of the private session's event receiver.
+    pub(crate) parent_observer_event_tx: OnceLock<Sender<Event>>,
     pub(super) agent_status: watch::Sender<AgentStatus>,
     pub(super) state: Mutex<SessionState>,
     /// Orders accepted settings commits and their persisted events with compaction checkpoints.
@@ -663,6 +666,25 @@ async fn warm_plugins_and_skills_for_session_init(
 }
 
 impl Session {
+    pub(super) async fn effective_thread_config_snapshot(
+        &self,
+        configuration: &SessionConfiguration,
+        environments: Vec<TurnEnvironmentSelection>,
+    ) -> ThreadConfigSnapshot {
+        let mut snapshot = configuration.thread_config_snapshot(environments);
+        let model_info = Box::pin(configuration.step_settings.resolve_model_info(
+            self.services.models_manager.as_ref(),
+            &configuration.model_info_overrides,
+        ))
+        .await;
+        snapshot.service_tier = get_service_tier(
+            snapshot.service_tier.take(),
+            &configuration.original_config_do_not_use.features,
+            &model_info,
+        );
+        snapshot
+    }
+
     /// Returns the concrete identity for this thread.
     pub(crate) fn thread_id(&self) -> ThreadId {
         self.thread_id
@@ -698,6 +720,7 @@ impl Session {
             request_kind,
         );
         ExecutionMetadata::from_settings(&step_context.settings).apply_to(&mut responses_metadata);
+        responses_metadata.guardian_recorded_items = self.parent_observer_event_tx.get().is_some();
         responses_metadata.tool_namespaces_info = if step_context
             .turn
             .config
@@ -1836,6 +1859,7 @@ impl Session {
                 thread_id,
                 installation_id,
                 tx_event: tx_event.clone(),
+                parent_observer_event_tx: OnceLock::new(),
                 agent_status,
                 state: Mutex::new(state),
                 thread_settings_persistence: Semaphore::new(/*permits*/ 1),
@@ -1879,8 +1903,12 @@ impl Session {
                 *guard = Arc::downgrade(&sess);
             }
             // Dispatch the SessionConfiguredEvent first and then report any errors.
-            let thread_config =
-                session_configuration.thread_config_snapshot(turn_environments.selections());
+            let thread_config = sess
+                .effective_thread_config_snapshot(
+                    &session_configuration,
+                    turn_environments.selections(),
+                )
+                .await;
             let events = std::iter::once(Event {
                 id: INITIAL_SUBMIT_ID.to_owned(),
                 msg: EventMsg::SessionConfigured(SessionConfiguredEvent {

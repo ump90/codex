@@ -4,6 +4,7 @@ mod workspace_routing;
 mod account_grant;
 pub use account_grant::AccountOAuthGrant;
 pub use account_grant::AccountOAuthGrantLease;
+pub use account_grant::AccountOAuthGrantRevision;
 use account_grant::same_account_grant;
 use account_grant::same_account_login;
 
@@ -2484,7 +2485,7 @@ impl AuthManager {
 
         let auth = self.auth_cached()?;
         if let Some(reason) = Self::proactive_refresh_reason(&auth)
-            && let Err(err) = self.refresh_token_with_reason(reason).await
+            && let Err(err) = self.refresh_token_with_reason(reason, Some(&auth)).await
         {
             tracing::error!("Failed to refresh token: {}", err);
             return Some(auth);
@@ -2572,6 +2573,17 @@ impl AuthManager {
             .acquire_owned()
             .await
             .map_err(|_| std::io::Error::other("Account refresh coordination is unavailable."))?;
+        Ok(self
+            .account_oauth_grant()
+            .await?
+            .map(|grant| AccountOAuthGrantLease { grant, permit }))
+    }
+
+    /// Reads an owner-checked grant without waiting for or excluding account refresh.
+    /// Use this for inspection; lease the grant again before exchanging its refresh token.
+    pub async fn account_oauth_grant(
+        self: &Arc<Self>,
+    ) -> std::io::Result<Option<AccountOAuthGrant>> {
         let login_generation = self.auth_change_state_tx.borrow().login_generation;
         let Some(tokens) = self.read_account_grant_tokens().await? else {
             return Ok(None);
@@ -2584,7 +2596,64 @@ impl AuthManager {
         if !grant.owner_is_current() {
             return Ok(None);
         }
-        Ok(Some(AccountOAuthGrantLease { grant, permit }))
+        Ok(Some(grant))
+    }
+
+    /// Checks the persisted account owner without requiring an EMA-eligible account grant.
+    /// Dedicated enterprise credentials still belong to this account login.
+    pub async fn account_login_is_current(&self, expected: &CodexAuth) -> std::io::Result<bool> {
+        if !matches!(expected, CodexAuth::Chatgpt(_)) {
+            return Ok(self.auth_cached().is_some_and(|current| {
+                !matches!(current, CodexAuth::Chatgpt(_))
+                    && current.get_account_id() == expected.get_account_id()
+                    && current.get_chatgpt_user_id() == expected.get_chatgpt_user_id()
+            }));
+        }
+        let expected = expected.get_token_data()?;
+        if expected
+            .login_owner_id
+            .as_ref()
+            .is_none_or(String::is_empty)
+        {
+            return Ok(false);
+        }
+        let matches_owner = || {
+            self.auth_cached().is_some_and(|auth| {
+                matches!(auth, CodexAuth::Chatgpt(_))
+                    && auth
+                        .get_token_data()
+                        .is_ok_and(|tokens| account_grant::same_account_login(&expected, &tokens))
+            })
+        };
+        if !matches_owner() {
+            return Ok(false);
+        }
+        let stored = self.read_persisted_account_tokens().await?;
+        Ok(matches_owner()
+            && stored
+                .as_ref()
+                .is_some_and(|tokens| account_grant::same_account_login(&expected, tokens)))
+    }
+
+    async fn read_persisted_account_tokens(&self) -> std::io::Result<Option<TokenData>> {
+        let home = self.codex_home.clone();
+        let mode = self.auth_credentials_store_mode;
+        let backend = self.keyring_backend_kind;
+        let originator = codex_otel::auth_storage::AuthStorageOriginator::current();
+        let stored = tokio::task::spawn_blocking(move || {
+            originator.sync_scope(|| {
+                let _commit = auth_storage_commit_guard()?;
+                create_auth_storage(home, mode, backend).load_account_grant()
+            })
+        })
+        .await
+        .map_err(|_| std::io::Error::other("Account credential read failed."))?
+        .map_err(|_: std::io::Error| {
+            std::io::Error::other("Account credential storage is unavailable.")
+        })?;
+        Ok(stored
+            .filter(|auth| auth.resolved_mode() == AuthMode::Chatgpt)
+            .and_then(|auth| auth.tokens))
     }
 
     async fn read_account_grant_tokens(&self) -> std::io::Result<Option<TokenData>> {
@@ -2607,25 +2676,8 @@ impl AuthManager {
             return Ok(None);
         }
         let cached = auth.get_token_data()?;
-        let home = self.codex_home.clone();
-        let mode = self.auth_credentials_store_mode;
-        let backend = self.keyring_backend_kind;
-        let originator = codex_otel::auth_storage::AuthStorageOriginator::current();
-        let stored = tokio::task::spawn_blocking(move || {
-            originator.sync_scope(|| {
-                let _commit = auth_storage_commit_guard()?;
-                create_auth_storage(home, mode, backend).load_account_grant()
-            })
-        })
-        .await
-        .map_err(|_| std::io::Error::other("Account credential read failed."))?
-        .map_err(|_: std::io::Error| {
-            std::io::Error::other("Account credential storage is unavailable.")
-        })?;
-        let Some(stored) = stored.filter(|auth| auth.resolved_mode() == AuthMode::Chatgpt) else {
-            return Ok(None);
-        };
-        Ok(stored.tokens.filter(|tokens| {
+        let stored = self.read_persisted_account_tokens().await?;
+        Ok(stored.filter(|tokens| {
             tokens.oauth_provenance.as_ref().is_some_and(|provenance| {
                 !provenance.issuer.trim().is_empty() && !provenance.client_id.trim().is_empty()
             }) && tokens
@@ -3053,17 +3105,28 @@ impl AuthManager {
         Ok(auth)
     }
 
-    /// Attempt to refresh the token by first performing a guarded reload from
-    /// the active auth source. If the loaded token differs from the cached token,
-    /// we can assume that the source already refreshed it. Otherwise, ask the
-    /// token authority to refresh.
+    /// Refreshes external auth through its provider. For managed auth, first
+    /// performs a guarded reload: if the stored token differs from the cached
+    /// token, reuse it; otherwise, ask the token authority to refresh.
     pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
-        self.refresh_token_with_reason(RefreshReason::Forced).await
+        self.refresh_token_with_reason(RefreshReason::Forced, /*expected_auth*/ None)
+            .await
+    }
+
+    /// Refreshes only if the expected credential is still current after acquiring
+    /// the existing refresh guard, so queued callers reuse a completed refresh.
+    pub async fn refresh_token_if_unchanged(
+        &self,
+        expected_auth: &CodexAuth,
+    ) -> Result<(), RefreshTokenError> {
+        self.refresh_token_with_reason(RefreshReason::Forced, Some(expected_auth))
+            .await
     }
 
     async fn refresh_token_with_reason(
         &self,
         reason: RefreshReason,
+        expected_auth: Option<&CodexAuth>,
     ) -> Result<(), RefreshTokenError> {
         let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
             RefreshTokenError::Permanent(RefreshTokenFailedError::new(
@@ -3072,6 +3135,14 @@ impl AuthManager {
             ))
         })?;
         let auth_before_reload = self.auth_cached();
+        if let Some(expected_auth) = expected_auth
+            && !Self::auths_equal_for_refresh(auth_before_reload.as_ref(), Some(expected_auth))
+        {
+            return Ok(());
+        }
+        if self.has_external_auth() {
+            return self.refresh_token_from_authority_impl(reason).await;
+        }
         if auth_before_reload
             .as_ref()
             .is_some_and(|auth| auth.is_api_key_auth() || auth.is_personal_access_token_auth())
